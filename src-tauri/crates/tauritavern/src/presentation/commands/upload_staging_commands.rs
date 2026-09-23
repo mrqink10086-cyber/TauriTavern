@@ -137,6 +137,26 @@ fn validate_staged_path(app: &AppHandle, file_path: &str) -> Result<PathBuf, Com
         ));
     }
 
+    // Only the parent is canonicalized above, so a symlink in the final segment would
+    // still pass the containment check and be followed when the file is opened. Reject
+    // anything that is not a plain file. A missing file is allowed because discard is
+    // expected to be idempotent.
+    match std::fs::symlink_metadata(&requested) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => {
+            return Err(CommandError::BadRequest(
+                "Upload staging path is not a regular file".to_string(),
+            ))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(CommandError::InternalServerError(format!(
+                "Failed to inspect upload staging file: {}",
+                error
+            )))
+        }
+    }
+
     Ok(requested)
 }
 

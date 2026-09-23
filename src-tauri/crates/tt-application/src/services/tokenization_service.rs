@@ -25,6 +25,44 @@ impl TokenizationService {
         }
     }
 
+    /// Waits until the tokenizer model is loaded and usable.
+    pub async fn ensure_model_ready(&self, model: &str) -> Result<(), ApplicationError> {
+        let model = self.normalize_model(model);
+        self.tokenizer_repository
+            .ensure_model_ready(model.as_ref())
+            .await
+            .map_err(ApplicationError::from)
+    }
+
+    /// Builds a synchronous raw-text token counter for the given model.
+    ///
+    /// The caller must have awaited [`Self::ensure_model_ready`] for the same
+    /// model first. After readiness an encode failure is a real bug, so the
+    /// closure logs it and keeps going instead of panicking mid-evaluation.
+    ///
+    /// The fallback must err on the safe side: under-counting lets more entries
+    /// into the prompt and can blow the context budget, while over-counting
+    /// only drops one. So a failed encode reports a conservative upper bound
+    /// (at least one token per two bytes) rather than zero.
+    pub fn text_token_counter(&self, model: &str) -> impl Fn(&str) -> u32 + 'static {
+        let repository = Arc::clone(&self.tokenizer_repository);
+        let model = self.normalize_model(model).into_owned();
+        move |text: &str| -> u32 {
+            repository
+                .encode(&model, text)
+                .map(|ids| ids.len().min(u32::MAX as usize) as u32)
+                .unwrap_or_else(|error| {
+                    tracing::error!(
+                        model = %model,
+                        %error,
+                        "world info injection token count failed; using a conservative estimate"
+                    );
+                    let bytes = text.len() as u32;
+                    bytes.div_ceil(2).max(1)
+                })
+        }
+    }
+
     pub async fn count_openai_tokens_batch(
         &self,
         dto: OpenAiTokenCountBatchRequestDto,

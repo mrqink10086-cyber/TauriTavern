@@ -203,6 +203,24 @@ export const power_user = {
         /** @type {Record<string, string>} */
         groups: {},
     },
+    state_declaration_bindings: {
+        /** @type {Record<string, string>} */
+        characters: {},
+        /** @type {Record<string, string>} */
+        groups: {},
+    },
+    state_machine_bindings: {
+        /** @type {Record<string, string>} */
+        characters: {},
+        /** @type {Record<string, string>} */
+        groups: {},
+    },
+    state_predicate_bindings: {
+        /** @type {Record<string, string>} */
+        characters: {},
+        /** @type {Record<string, string>} */
+        groups: {},
+    },
 
     gestures: true,
     auto_swipe: false,
@@ -1573,6 +1591,60 @@ function getThemeBindingCandidates() {
     return candidates;
 }
 
+export function getStateDeclarationBindingCandidates() {
+    const candidates = [];
+
+    if (getCurrentChatId()) {
+        candidates.push({ scope: 'chat', name: chat_metadata.state_declaration });
+    }
+
+    const entity = getCurrentThemeEntity();
+    if (entity) {
+        candidates.push({
+            scope: entity.scope,
+            name: (entity.scope === 'group' ? power_user.state_declaration_bindings.groups : power_user.state_declaration_bindings.characters)[entity.id],
+        });
+    }
+
+    return candidates;
+}
+
+export function getStateMachineBindingCandidates() {
+    const candidates = [];
+
+    if (getCurrentChatId()) {
+        candidates.push({ scope: 'chat', name: chat_metadata.state_machine });
+    }
+
+    const entity = getCurrentThemeEntity();
+    if (entity) {
+        candidates.push({
+            scope: entity.scope,
+            name: (entity.scope === 'group' ? power_user.state_machine_bindings.groups : power_user.state_machine_bindings.characters)[entity.id],
+        });
+    }
+
+    return candidates;
+}
+
+export function getStatePredicateBindingCandidates() {
+    const candidates = [];
+
+    if (getCurrentChatId()) {
+        candidates.push({ scope: 'chat', name: chat_metadata.state_predicates });
+    }
+
+    const entity = getCurrentThemeEntity();
+    if (entity) {
+        candidates.push({
+            scope: entity.scope,
+            name: (entity.scope === 'group' ? power_user.state_predicate_bindings.groups : power_user.state_predicate_bindings.characters)[entity.id],
+        });
+    }
+
+    return candidates;
+}
+
 function updateThemeBindingControls() {
     const entity = getCurrentThemeEntity();
     const chatAvailable = Boolean(getCurrentChatId());
@@ -1707,6 +1779,283 @@ async function toggleThemeBinding(scope) {
         removing ? t`Theme binding removed.` : t`Current theme bound.`,
         t`Theme Binding`,
     );
+}
+
+/**
+ * What each kind of state asset binds through: its `power_user` container, the
+ * chat-metadata key a chat binding lives under, and the wording its toasts use.
+ *
+ * One table is what keeps the kinds from drifting apart — a new kind is a row
+ * here, not another copy of the toggle. The wording entries are functions
+ * because `t` translates at call time, not at module load.
+ */
+const STATE_BINDING_KINDS = {
+    declaration: {
+        bindings: () => power_user.state_declaration_bindings,
+        chatKey: 'state_declaration',
+        label: () => t`State Declaration`,
+        emptyName: () => t`No state declaration is selected.`,
+        saveFailed: () => t`Could not save the state declaration binding.`,
+        removed: () => t`State declaration binding removed.`,
+        bound: () => t`State declaration bound.`,
+    },
+    machine: {
+        bindings: () => power_user.state_machine_bindings,
+        chatKey: 'state_machine',
+        label: () => t`State Machine`,
+        emptyName: () => t`No state machine is selected.`,
+        saveFailed: () => t`Could not save the state machine binding.`,
+        removed: () => t`State machine binding removed.`,
+        bound: () => t`State machine bound.`,
+    },
+    predicates: {
+        bindings: () => power_user.state_predicate_bindings,
+        chatKey: 'state_predicates',
+        label: () => t`State Predicates`,
+        emptyName: () => t`No state predicate set is selected.`,
+        saveFailed: () => t`Could not save the state predicate binding.`,
+        removed: () => t`State predicate binding removed.`,
+        bound: () => t`State predicate bound.`,
+    },
+};
+
+function stateBindingKind(kind) {
+    return STATE_BINDING_KINDS[kind] ?? STATE_BINDING_KINDS.declaration;
+}
+
+/**
+ * Where one kind of state asset is currently bound, as a settings panel needs it.
+ *
+ * `kind` names the asset: `'declaration'`, `'machine'` or `'predicates'`. The
+ * answer says whether a chat is open, which entity is active, and what each
+ * target currently binds — enough for a panel to label its buttons and its
+ * "currently bound to" line without guessing what the binding containers hold.
+ *
+ * @param {'declaration'|'machine'|'predicates'} kind
+ * @returns {{ chatAvailable: boolean, entityScope: 'character'|'group'|null, chatName: string, entityName: string }}
+ */
+export function getStateBindingState(kind) {
+    const descriptor = stateBindingKind(kind);
+    const bindings = descriptor.bindings();
+    const entity = getCurrentThemeEntity();
+    const entityBindings = entity
+        ? (entity.scope === 'group' ? bindings.groups : bindings.characters)
+        : null;
+    return {
+        chatAvailable: Boolean(getCurrentChatId()),
+        entityScope: entity ? entity.scope : null,
+        chatName: String(chat_metadata[descriptor.chatKey] || ''),
+        entityName: entityBindings ? String(entityBindings[entity.id] || '') : '',
+    };
+}
+
+/**
+ * Write one state binding, or remove it when it is already the bound name.
+ *
+ * Chat bindings live on the chat header metadata and entity bindings in
+ * `power_user`, so this is the one place that knows both, which save call each
+ * one needs, and how to roll the container back when that save fails.
+ *
+ * @param {'declaration'|'machine'|'predicates'} kind
+ * @param {'chat'|'entity'} scope
+ * @param {string} name
+ * @returns {Promise<boolean>} whether the target now binds `name`
+ */
+async function toggleStateBinding(kind, scope, name) {
+    const descriptor = stateBindingKind(kind);
+    const bindings = descriptor.bindings();
+    const label = descriptor.label();
+    const bindingName = String(name || '').trim();
+    const entity = getCurrentThemeEntity();
+    const chatAvailable = Boolean(getCurrentChatId());
+    let bindingOwner;
+    let bindingKey;
+
+    if (scope === 'chat' && chatAvailable) {
+        bindingOwner = chat_metadata;
+        bindingKey = descriptor.chatKey;
+    } else if (scope === 'entity' && entity) {
+        bindingOwner = entity.scope === 'group' ? bindings.groups : bindings.characters;
+        bindingKey = entity.id;
+    } else {
+        toastr.warning(t`No binding target is selected.`, label);
+        return false;
+    }
+
+    if (!bindingName) {
+        toastr.error(descriptor.emptyName(), label);
+        return false;
+    }
+
+    const previousName = bindingOwner[bindingKey];
+    const removing = previousName === bindingName;
+    if (removing) {
+        delete bindingOwner[bindingKey];
+    } else {
+        bindingOwner[bindingKey] = bindingName;
+    }
+
+    try {
+        if (scope === 'chat') {
+            await saveMetadata();
+        } else if (!await saveSettings()) {
+            throw new Error('Settings save failed');
+        }
+    } catch (error) {
+        if (previousName === undefined) {
+            delete bindingOwner[bindingKey];
+        } else {
+            bindingOwner[bindingKey] = previousName;
+        }
+        console.error(`State ${kind} binding could not be saved`, error);
+        toastr.error(descriptor.saveFailed(), label);
+        return false;
+    }
+
+    toastr[removing ? 'info' : 'success'](
+        removing ? descriptor.removed() : descriptor.bound(),
+        label,
+    );
+    return !removing;
+}
+
+/**
+ * Bind the named state declaration to the chat, or to the active character/group.
+ *
+ * Exported for the Agent System settings panel, which owns the list of saved
+ * declarations: it hands over the selected name and reads the result back.
+ *
+ * @param {'chat'|'entity'} scope
+ * @param {string} name
+ * @returns {Promise<boolean>}
+ */
+export async function toggleStateDeclarationBinding(scope, name) {
+    return toggleStateBinding('declaration', scope, name);
+}
+
+/**
+ * The state machine counterpart of `toggleStateDeclarationBinding`.
+ *
+ * @param {'chat'|'entity'} scope
+ * @param {string} name
+ * @returns {Promise<boolean>}
+ */
+export async function toggleStateMachineBinding(scope, name) {
+    return toggleStateBinding('machine', scope, name);
+}
+
+/**
+ * The predicate counterpart of `toggleStateDeclarationBinding`.
+ *
+ * @param {'chat'|'entity'} scope
+ * @param {string} name
+ * @returns {Promise<boolean>}
+ */
+export async function toggleStatePredicateBinding(scope, name) {
+    return toggleStateBinding('predicates', scope, name);
+}
+
+/**
+ * What one character binds, named by its avatar file.
+ *
+ * `getStateBindingState` answers for the active entity, which is the wrong
+ * question for a caller that holds an avatar and no open panel: a background
+ * install needs to know whether the character it is about to bind already binds
+ * something of the user's own.
+ *
+ * @param {string} avatar
+ * @returns {string} the bound declaration name, empty when nothing is bound
+ */
+export function getStateDeclarationBindingForAvatar(avatar) {
+    const avatarName = String(avatar || '').trim();
+    if (!avatarName) {
+        return '';
+    }
+
+    return String(power_user.state_declaration_bindings.characters[avatarName] || '');
+}
+
+/**
+ * Bind one state asset to one character, named by its avatar file.
+ *
+ * `toggleStateBinding` writes to whatever entity is active, which is the right
+ * answer while a panel is open and the wrong one right after a card is imported:
+ * the import has the avatar, and the new character may not be selected yet. The
+ * avatar is also exactly the key the character binding container uses, so this
+ * needs no context beyond the kind and the two strings it is given.
+ *
+ * @param {'declaration'|'machine'|'predicates'} kind
+ * @param {string} avatar
+ * @param {string} name
+ * @returns {Promise<boolean>} whether the character now binds `name`
+ */
+async function bindStateAssetToAvatar(kind, avatar, name) {
+    const descriptor = stateBindingKind(kind);
+    const bindingName = String(name || '').trim();
+    const avatarName = String(avatar || '').trim();
+    if (!avatarName || !bindingName) {
+        toastr.error(descriptor.emptyName(), descriptor.label());
+        return false;
+    }
+
+    const bindings = descriptor.bindings();
+    const previousName = bindings.characters[avatarName];
+    bindings.characters[avatarName] = bindingName;
+
+    try {
+        if (!await saveSettings()) {
+            throw new Error('Settings save failed');
+        }
+    } catch (error) {
+        if (previousName === undefined) {
+            delete bindings.characters[avatarName];
+        } else {
+            bindings.characters[avatarName] = previousName;
+        }
+        console.error(`State ${kind} binding for ${avatarName} could not be saved`, error);
+        toastr.error(descriptor.saveFailed(), descriptor.label());
+        return false;
+    }
+
+    toastr.success(descriptor.bound(), descriptor.label());
+    return true;
+}
+
+/**
+ * Bind a state declaration to one character, for callers that hold an avatar
+ * rather than an open panel.
+ *
+ * Exported for the character import path: a card that carries a scene should end
+ * up showing it, and the card's own avatar is the only target that import knows.
+ *
+ * @param {string} avatar
+ * @param {string} name
+ * @returns {Promise<boolean>}
+ */
+export async function bindStateDeclarationToCharacter(avatar, name) {
+    return bindStateAssetToAvatar('declaration', avatar, name);
+}
+
+/**
+ * The state machine counterpart, for the character import path.
+ *
+ * @param {string} avatar
+ * @param {string} name
+ * @returns {Promise<boolean>}
+ */
+export async function bindStateMachineToCharacter(avatar, name) {
+    return bindStateAssetToAvatar('machine', avatar, name);
+}
+
+/**
+ * The predicate counterpart, for the character import path.
+ *
+ * @param {string} avatar
+ * @param {string} name
+ * @returns {Promise<boolean>}
+ */
+export async function bindStatePredicateToCharacter(avatar, name) {
+    return bindStateAssetToAvatar('predicates', avatar, name);
 }
 
 function migrateCharacterThemeBinding(oldAvatar, newAvatar) {

@@ -617,10 +617,13 @@ class BulkEditOverlay {
      * @param event
      * @returns {(boolean|number|*)[]}
      */
-    #getContextMenuPosition = (event) => [
-        event.clientX || event.touches[0].clientX,
-        event.clientY || event.touches[0].clientY,
-    ];
+    #getContextMenuPosition = (event) => {
+        // Mouse events expose the coordinates directly; touch events carry them in
+        // `touches` (touchstart) or `changedTouches` (touchend). `||` must not be used
+        // here because 0 is a valid coordinate.
+        const point = event.touches?.[0] ?? event.changedTouches?.[0] ?? event;
+        return [point.clientX ?? 0, point.clientY ?? 0];
+    };
 
     #stopEventPropagation = (event) => {
         if (this.#contextMenuOpen) {

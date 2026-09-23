@@ -19,6 +19,7 @@ use tt_domain::models::agent::{
 };
 use tt_domain::models::tool::ToolTurnContract;
 use tt_domain::text_metrics::TextMetrics;
+use tt_domain::transcript::compact_tool_transcript;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(
@@ -63,6 +64,28 @@ impl AgentRuntimeService {
                     self.ensure_not_cancelled(cancel)?;
                     if round > progress.max_rounds {
                         return Ok(None);
+                    }
+                    // The transcript is resent in full every round, so the
+                    // protocol shell of past tool turns compounds. Fold the
+                    // turns that aged out of the window before asking again.
+                    let compaction = compact_tool_transcript(
+                        &mut prepared.request.messages,
+                        profile.tools.unfolded_tool_turns,
+                    );
+                    if compaction.folded_turns > 0 {
+                        self.event(
+                            run_id,
+                            AgentRunEventLevel::Debug,
+                            "tool_transcript_compacted",
+                            json!({
+                                "round": round,
+                                "invocationId": invocation_id,
+                                "foldedTurns": compaction.folded_turns,
+                                "foldedMessages": compaction.folded_messages,
+                                "unfoldedToolTurns": profile.tools.unfolded_tool_turns,
+                            }),
+                        )
+                        .await?;
                     }
                     if updates_run_status {
                         self.apply_pending_guidance_to_request(

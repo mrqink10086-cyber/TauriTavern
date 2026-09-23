@@ -1,0 +1,429 @@
+/**
+ * State panel: default style.
+ *
+ * Levels, in order: this file, then the user's theme CSS, then (later) the
+ * user's HTML template. Everything below therefore stays additive — a user CSS
+ * only has to express the difference, and these rules keep a panel readable
+ * when nothing is configured.
+ *
+ * The class names are the public contract:
+ *   .tt-state-root > .tt-state-panel
+ *     > .tt-state-panel__header + .tt-state-panel__body
+ *       > .tt-state-field > .tt-state-field__label + .tt-state-field__value
+ *                                     | .tt-state-field__images > img
+ *
+ * `.tt-state-panel__stale` sits inline in a header whose floor did not update
+ * state: the panel shows the previous version, and the mark says so.
+ */
+
+.tt-state-root {
+    position: fixed;
+    inset: 0;
+    /* A layer over the chat that never takes clicks meant for it: only the
+     * panels and the two buttons switch this back on. */
+    pointer-events: none;
+    /* The layer is mounted inside `#sheld`, which is its own stacking context
+     * (`style.css`, z-index 30). Its children are what this competes with, and
+     * both the transcript (`#chat`) and the input form (`#form_sheld`) sit at
+     * 30 there — so anything above 30 wins, and the transcript stopped covering
+     * the panels. It stays inside the sheet's context on purpose: the top bar,
+     * the drawers and the popups are outside it and stay above a panel. */
+    z-index: 100;
+}
+
+/* Closed means gone, not merely invisible: a hidden panel must not keep a tab
+ * stop or a scroll area alive behind the chat. */
+.tt-state-root:not(.tt-state-root--open) .tt-state-panel {
+    display: none;
+}
+
+.tt-state-panel {
+    position: absolute;
+    display: flex;
+    flex-direction: column;
+    box-sizing: border-box;
+    overflow: hidden;
+    pointer-events: auto;
+    border-radius: 10px;
+    padding: 6px 8px;
+    color: var(--SmartThemeBodyColor, inherit);
+    background-color: rgba(0, 0, 0, 0.35);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    backdrop-filter: blur(4px);
+    font-size: 0.85em;
+    line-height: 1.35;
+}
+
+/* The header is the drag handle, so it has to say so and must not select text
+ * while the pointer is moving over it. */
+.tt-state-panel__header {
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+}
+
+.tt-state-panel__header:active {
+    cursor: grabbing;
+}
+
+/* The corner handle. It sits inside the header, so it also has to stop the
+ * header's own pointerdown from starting a drag. */
+.tt-state-panel__resize {
+    position: absolute;
+    right: 2px;
+    bottom: 2px;
+    width: 14px;
+    height: 14px;
+    cursor: nwse-resize;
+    touch-action: none;
+    opacity: 0.4;
+    background: linear-gradient(135deg, transparent 0 45%, currentColor 45% 55%, transparent 55%);
+}
+
+.tt-state-panel__resize:hover {
+    opacity: 0.9;
+}
+
+.tt-state-panel__header {
+    font-weight: 600;
+    opacity: 0.85;
+    margin-bottom: 4px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+    padding-bottom: 2px;
+    /* Clicking the title folds the panel: the body is what takes up room. */
+    cursor: pointer;
+}
+
+/* The floor's state did not move, so the panel is showing an older version.
+ * Inline rather than floated: the header's fold caret already owns the right
+ * corner, and two floats in one header would fight over it. */
+.tt-state-panel__stale {
+    margin-left: 4px;
+    font-size: 0.85em;
+    opacity: 0.6;
+}
+
+/* The folded state, drawn rather than written: a caret that turns. */
+.tt-state-panel__header::after {
+    content: '';
+    float: right;
+    width: 0;
+    height: 0;
+    margin-top: 0.4em;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid currentColor;
+    opacity: 0.55;
+}
+
+.tt-state-panel--folded > .tt-state-panel__body {
+    display: none;
+}
+
+.tt-state-panel--folded > .tt-state-panel__header {
+    margin-bottom: 0;
+    padding-bottom: 0;
+    border-bottom: none;
+}
+
+.tt-state-panel--folded > .tt-state-panel__header::after {
+    transform: rotate(-90deg);
+}
+
+.tt-state-panel__body {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    background-repeat: no-repeat;
+    background-size: cover;
+    background-position: center;
+}
+
+/* How the picture fills the box is the set's own decision (`fit` in the
+ * declaration). Fill-and-crop is the default because it is what a scene wants;
+ * fitting the whole picture inside is what a portrait wants, and it leaves bare
+ * panel around the picture on purpose. */
+.tt-state-panel__body[data-fit="contain"] {
+    background-size: contain;
+}
+
+/* Text over a picture is still text: a scrim under the content keeps it
+ * readable whatever the state picked, and the inset shadow paints above the
+ * background image and below everything written on it. */
+.tt-state-panel__body[data-has-background="true"] {
+    box-shadow: inset 0 0 0 9999px rgba(0, 0, 0, 0.35);
+}
+
+/* What somebody wrote down: a section of its own, not a field.
+   The text keeps its own line breaks, because prose is not a value. */
+.tt-state-prose {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 8px 10px;
+    border-top: 1px solid var(--tt-state-border, rgba(255, 255, 255, 0.12));
+}
+
+.tt-state-prose__title {
+    font-weight: 600;
+    opacity: 0.9;
+}
+
+.tt-state-prose__text {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    line-height: 1.5;
+    opacity: 0.85;
+}
+
+.tt-state-prose__text:empty::before {
+    content: '（还没有写）';
+    opacity: 0.5;
+}
+
+/* The pencil sits with the heading, not over the text: what it opens is the
+   whole block, and it is not a control on any one line of it. */
+.tt-state-prose__edit {
+    align-self: flex-start;
+    padding: 0 4px;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    opacity: 0.5;
+    cursor: pointer;
+    font-size: calc(var(--mainFontSize) * 0.85);
+}
+
+.tt-state-prose__edit:hover {
+    opacity: 1;
+}
+
+.tt-state-prose__editor {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.tt-state-prose__editor-input {
+    width: 100%;
+    resize: vertical;
+    font-family: inherit;
+    font-size: inherit;
+    line-height: 1.5;
+}
+
+.tt-state-prose__editor-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.tt-state-prose__editor-error {
+    color: var(--tt-state-error, #ff8a8a);
+    font-size: calc(var(--mainFontSize) * 0.85);
+}
+
+.tt-state-field {
+    display: flex;
+    gap: 6px;
+    align-items: baseline;
+}
+
+.tt-state-field__label {
+    opacity: 0.7;
+    flex: 0 0 auto;
+}
+
+.tt-state-field__label::after {
+    content: ':';
+}
+
+.tt-state-field__value {
+    flex: 1 1 auto;
+    word-break: break-word;
+}
+
+.tt-state-field__images {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    flex: 1 1 auto;
+}
+
+.tt-state-field__images img {
+    max-width: 100%;
+    max-height: 120px;
+    border-radius: 6px;
+    object-fit: cover;
+}
+
+/* A picture that has to be the whole picture gets the room to be one: a
+ * portrait squeezed into a 120px strip of panel shows a shoulder. */
+.tt-state-field__images[data-fit="contain"] img {
+    max-height: 320px;
+    object-fit: contain;
+}
+
+/* The write path: a pencil per editable field, and the editor it opens. The
+ * editor wraps to its own line, because a value with several lines needs the
+ * room and a rail is narrow. */
+.tt-state-field__edit {
+    flex: 0 0 auto;
+    border: 0;
+    background: none;
+    color: inherit;
+    opacity: 0.45;
+    cursor: pointer;
+    padding: 0 2px;
+    font-size: 0.85em;
+}
+
+.tt-state-field__edit:hover,
+.tt-state-field__edit:focus-visible {
+    opacity: 1;
+}
+
+.tt-state-field__editor {
+    flex: 0 0 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 4px;
+}
+
+.tt-state-field__editor-input {
+    width: 100%;
+    resize: vertical;
+    font: inherit;
+    color: inherit;
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 4px;
+    padding: 4px 6px;
+}
+
+.tt-state-field__editor-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.tt-state-field__editor-action {
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.06);
+    color: inherit;
+    cursor: pointer;
+    padding: 2px 8px;
+    font: inherit;
+}
+
+.tt-state-field__editor-action:hover,
+.tt-state-field__editor-action:focus-visible {
+    background: rgba(255, 255, 255, 0.14);
+}
+
+.tt-state-field__editor-error {
+    color: #ff8a80;
+    word-break: break-word;
+}
+
+/* Narrow screens: a window has nowhere to float, so the panels become sheets
+ * along the bottom, where the room is and a thumb can reach them. Where a panel
+ * was dragged to belongs to the wide layout, hence the overrides. */
+@media (max-width: 768px) {
+    .tt-state-root--open {
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-end;
+        gap: 6px;
+        padding: 0 6px env(safe-area-inset-bottom, 0);
+        overflow-y: auto;
+    }
+
+    .tt-state-panel {
+        position: static;
+        left: auto !important;
+        top: auto !important;
+        width: auto !important;
+        height: auto !important;
+        max-height: 40vh;
+        border-radius: 10px 10px 0 0;
+    }
+
+    /* Nothing is dragged down here, so the handles stop advertising themselves
+     * and the corner stops resizing a window the layout is placing. */
+    .tt-state-panel__header {
+        cursor: default;
+    }
+
+    .tt-state-panel__resize {
+        display: none;
+    }
+}
+
+/* The layer's own controls: open or close the panels, and re-read the state.
+ * Absolutely placed so they never push a panel around, and they ask for their
+ * own pointer events because the root is pointer-events:none. */
+.tt-state-refresh,
+.tt-state-launcher {
+    position: absolute;
+    /* Out of the chat's way: the sheet's input row owns the bottom of the
+     * column, and these two are the only controls the layer has — a control
+     * nobody can reach because it sits under the input is not a control. They
+     * sit at the far left, which is the gutter on a wide window. */
+    bottom: 8px;
+    pointer-events: auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.2));
+    border-radius: 50%;
+    background-color: var(--black30a, rgba(0, 0, 0, 0.3));
+    color: var(--SmartThemeBodyColor, #e8e2d8);
+    font-size: 12px;
+    cursor: pointer;
+    opacity: 0.35;
+    transition: opacity var(--animation-duration-2x, 0.2s);
+}
+
+.tt-state-launcher {
+    left: 8px;
+}
+
+.tt-state-refresh {
+    left: 40px;
+}
+
+/* A lit launcher is the one thing that says the layer is open. */
+.tt-state-launcher--on {
+    opacity: 0.8;
+}
+
+.tt-state-refresh:hover,
+.tt-state-refresh:focus-visible,
+.tt-state-launcher:hover,
+.tt-state-launcher:focus-visible {
+    opacity: 1;
+}
+
+/* Down here the sheets take the bottom of the root, so the buttons move above
+ * them. */
+@media (max-width: 768px) {
+    .tt-state-refresh,
+    .tt-state-launcher {
+        top: 6px;
+        bottom: auto;
+    }
+
+    .tt-state-launcher {
+        left: 6px;
+    }
+
+    .tt-state-refresh {
+        left: 38px;
+    }
+}

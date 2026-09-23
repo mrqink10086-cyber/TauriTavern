@@ -13,12 +13,17 @@ use crate::dto::agent_dto::{
 };
 use crate::errors::ApplicationError;
 use crate::services::agent_tools::{
-    AgentToolDispatchOutcome, AgentToolEffect, classify_workspace_io_error,
+    AgentToolDispatchOutcome, AgentToolEffect, STATE_DOCUMENT_PATH, classify_workspace_io_error,
+};
+use crate::services::recall_service::PublishedState;
+use crate::services::state_runtime::{
+    access_from_snapshot, declaration_from_snapshot, read_run_prompt_snapshot,
 };
 use tt_domain::models::agent::{
     AgentChatCommitMode, AgentRun, AgentRunEventLevel, AgentRunStatus, AgentToolResult,
     ArtifactTarget, WorkspacePath, WorkspacePersistentChangeSet,
 };
+use tt_domain::models::state_access::has_writable_access;
 use tt_domain::models::tool::ToolInvocation;
 use tt_domain::text_metrics::TextMetrics;
 use tt_ports::repositories::workspace_repository::WorkspaceFile;
@@ -480,6 +485,12 @@ impl AgentRuntimeService {
             .as_ref()
             .expect("published persistent state");
 
+        // The frontend binds the floor after it learns the version id from the
+        // metadata update below, so the records have to be in the index first —
+        // otherwise the binding would look for facts that are not there yet.
+        self.index_published_state_for_recall(&run, persistent_changes)
+            .await?;
+
         self.request_persistent_state_metadata_update(
             &run,
             persistent_changes,
@@ -536,24 +547,34 @@ impl AgentRuntimeService {
             )));
         }
 
+        let mut payload = json!({
+            "updateId": update_id.as_str(),
+            "runId": run.id.as_str(),
+            "workspaceId": run.workspace_id.as_str(),
+            "stableChatId": run.stable_chat_id.as_str(),
+            "chatRef": &run.chat_ref,
+            "generationType": run.generation_type.as_str(),
+            "profileId": run.profile_id.as_ref(),
+            "messageId": message_id,
+            "stateId": persistent_changes.state_id.as_str(),
+            "baseStateId": persistent_changes.base_state_id.as_deref(),
+            "changeCount": persistent_changes.changes.len(),
+            "changes": persistent_change_payloads(persistent_changes),
+        });
+        // A floor whose Profile could write state but produced no state document
+        // is worth naming: the panel reads the previous floor's version, and
+        // without this the host would present it as this floor's state.
+        if self
+            .state_update_expected_but_missing(run, persistent_changes)
+            .await?
+        {
+            payload["stateUpdated"] = Value::Bool(false);
+        }
         self.event(
             run.id.as_str(),
             AgentRunEventLevel::Info,
             "persistent_state_metadata_update_requested",
-            json!({
-                "updateId": update_id.as_str(),
-                "runId": run.id.as_str(),
-                "workspaceId": run.workspace_id.as_str(),
-                "stableChatId": run.stable_chat_id.as_str(),
-                "chatRef": &run.chat_ref,
-                "generationType": run.generation_type.as_str(),
-                "profileId": run.profile_id.as_ref(),
-                "messageId": message_id,
-                "stateId": persistent_changes.state_id.as_str(),
-                "baseStateId": persistent_changes.base_state_id.as_deref(),
-                "changeCount": persistent_changes.changes.len(),
-                "changes": persistent_change_payloads(persistent_changes),
-            }),
+            payload,
         )
         .await?;
 
@@ -609,6 +630,112 @@ impl AgentRuntimeService {
                 )))
             }
         }
+    }
+
+    /// Index the facts one published state version carries, for recall.
+    ///
+    /// Publication is atomic and already done, and the index is derived: a
+    /// failure here is reported and the run continues. Raising it would tell
+    /// the user their answer failed when it did not, and the backfill path can
+    /// rebuild the index from the published versions.
+    async fn index_published_state_for_recall(
+        &self,
+        run: &AgentRun,
+        persistent_changes: &WorkspacePersistentChangeSet,
+    ) -> Result<(), ApplicationError> {
+        let outcome = match self.recall_index_input(run, persistent_changes).await {
+            Ok(None) => return Ok(()),
+            Ok(Some(published)) => self
+                .recall_service
+                .index_published_state(&published)
+                .await
+                .map(|report| report.embedded),
+            Err(error) => Err(error),
+        };
+
+        match outcome {
+            Ok(embedded) => {
+                self.event(
+                    run.id.as_str(),
+                    AgentRunEventLevel::Info,
+                    "recall_indexed",
+                    json!({
+                        "stateId": persistent_changes.state_id.as_str(),
+                        "embedded": embedded,
+                    }),
+                )
+                .await?;
+            }
+            Err(error) => {
+                self.event(
+                    run.id.as_str(),
+                    AgentRunEventLevel::Error,
+                    "recall_index_failed",
+                    json!({
+                        "stateId": persistent_changes.state_id.as_str(),
+                        "message": error.to_string(),
+                    }),
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The facts of a published version, when it published any.
+    async fn recall_index_input(
+        &self,
+        run: &AgentRun,
+        persistent_changes: &WorkspacePersistentChangeSet,
+    ) -> Result<Option<PublishedState>, ApplicationError> {
+        let Some(document) = self
+            .read_persisted_state_document(run.workspace_id.as_str(), &persistent_changes.state_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        if document.fields.is_empty() {
+            // A version with no state document is the normal outcome of a chat
+            // that declares no state, and has nothing to index.
+            return Ok(None);
+        }
+
+        let snapshot =
+            read_run_prompt_snapshot(self.workspace_repository.as_ref(), run.id.as_str()).await?;
+        let declaration = declaration_from_snapshot(&snapshot)?;
+        Ok(Some(PublishedState {
+            stable_chat_id: run.stable_chat_id.as_str().to_string(),
+            state_id: persistent_changes.state_id.clone(),
+            document,
+            declaration,
+        }))
+    }
+
+    /// Whether this run was expected to update state and did not.
+    ///
+    /// The expectation comes from the access policy frozen into the run input: a
+    /// Profile that may write no field has nothing to be late with, so the host
+    /// hears nothing at all. The answer is read from the publication rather than
+    /// from the tool log — what the panel cares about is whether the state
+    /// document changed, whoever wrote it.
+    async fn state_update_expected_but_missing(
+        &self,
+        run: &AgentRun,
+        persistent_changes: &WorkspacePersistentChangeSet,
+    ) -> Result<bool, ApplicationError> {
+        let snapshot =
+            read_run_prompt_snapshot(self.workspace_repository.as_ref(), run.id.as_str()).await?;
+        // Both sides answer: a declared field is writable by default, so a run
+        // with an empty access policy can still be late with state.
+        let access = access_from_snapshot(&snapshot)?;
+        let declaration = declaration_from_snapshot(&snapshot)?;
+        if !has_writable_access(&access, &declaration) {
+            return Ok(false);
+        }
+        Ok(!persistent_changes
+            .changes
+            .iter()
+            .any(|change| change.path == STATE_DOCUMENT_PATH))
     }
 
     pub(super) async fn clear_pending_host_requests_for_run(&self, run_id: &str) {

@@ -2641,6 +2641,15 @@ body:is([data-generating="true"], [data-swiping="true"]) .ttas-agent-send-toggle
     gap: 12px;
     min-height: 0;
     padding: 12px;
+    /* The tab strip stays put and the open tab scrolls under it. Scrolling this
+       box instead would slide sticky content underneath a translucent header,
+       which is what made the strip unreadable. */
+    overflow: hidden;
+}
+
+.ttas-tab-panel {
+    flex: 1 1 auto;
+    min-height: 0;
     overflow: auto;
 }
 
@@ -2668,24 +2677,27 @@ body:is([data-generating="true"], [data-swiping="true"]) .ttas-agent-send-toggle
 }
 
 .ttas-tabs {
-    position: sticky;
-    top: 0;
-    z-index: 2;
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    display: flex;
+    flex: none;
+    flex-wrap: nowrap;
     gap: 4px;
     padding: 4px;
     border: 1px solid var(--ttas-border-soft);
     border-radius: var(--ttas-radius);
-    background-color: color-mix(in srgb, var(--SmartThemeBlurTintColor) 92%, transparent);
-    backdrop-filter: blur(var(--SmartThemeBlurStrength));
-    -webkit-backdrop-filter: blur(var(--SmartThemeBlurStrength));
+    background-color: color-mix(in srgb, var(--SmartThemeBlurTintColor) 96%, transparent);
 }
 
 .ttas-tabs .menu_button {
-    width: 100%;
+    flex: 1 1 0;
+    width: auto;
     min-width: 0;
     margin: 0;
+}
+
+.ttas-tabs .menu_button > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .ttas-tabs .menu_button.active {
@@ -2865,17 +2877,18 @@ body:is([data-generating="true"], [data-swiping="true"]) .ttas-agent-send-toggle
     flex-direction: column;
     gap: 10px;
     padding: 10px;
-    scroll-margin-top: 72px;
 }
 
+/* The tab strip is outside the scrolling box, so the sticky offset is simply
+   the top of that box — no height to keep in sync. */
 .ttas-side-list {
     position: sticky;
-    top: 58px;
+    top: 0;
 }
 
 .ttas-section-rail {
     position: sticky;
-    top: 58px;
+    top: 0;
     z-index: 3;
     display: flex;
     flex-direction: column;
@@ -4090,7 +4103,7 @@ textarea.ttas-json {
 
 .ttas-tool-editor-panel {
     position: sticky;
-    top: 58px;
+    top: 0;
     display: flex;
     flex-direction: column;
     gap: 10px;
@@ -5272,10 +5285,6 @@ textarea.ttas-json {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
-    .ttas-section {
-        scroll-margin-top: 58px;
-    }
-
     .ttas-file-dialog {
         --ttas-file-viewer-margin-x: 18px;
         --ttas-file-viewer-margin-y: 18px;
@@ -5313,8 +5322,40 @@ textarea.ttas-json {
         padding: 10px;
     }
 
-    .ttas-side-list {
+    .ttas-tabs {
+        flex-wrap: wrap;
+    }
+
+    .ttas-tabs .menu_button {
+        flex: 1 1 calc(50% - 2px);
+    }
+
+    /* The declaration / machine / predicate editors offer no other control for
+       picking an item, so their list stays — as a strip above the editor rather
+       than a column beside it. The Profile tab has its own pickers and does not
+       need it at this width. */
+    .ttas-profile-layout .ttas-side-list {
         display: none;
+    }
+
+    .ttas-side-list {
+        position: static;
+        flex-direction: row;
+        gap: 6px;
+        max-height: none;
+        padding: 6px;
+        overflow-x: auto;
+        overflow-y: hidden;
+    }
+
+    .ttas-side-list .ttas-list-header {
+        display: none;
+    }
+
+    .ttas-side-list > button {
+        flex: 0 0 auto;
+        width: auto;
+        white-space: nowrap;
     }
 
     .ttas-section-rail {
@@ -5549,4 +5590,426 @@ textarea.ttas-json {
         animation-duration: 0.01ms !important;
         animation-iteration-count: 1 !important;
     }
+}
+
+/* State declaration editor */
+
+.ttas-state-layout {
+    display: grid;
+    grid-template-columns: minmax(200px, 260px) minmax(0, 1fr);
+    gap: 16px;
+    align-items: start;
+}
+
+.ttas-state-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    min-width: 0;
+}
+
+/* What the tab is for: one paragraph, where the concepts live. */
+.ttas-state-guide {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 12px;
+    border: 1px solid var(--ttas-border-soft);
+    border-left: 3px solid var(--ttas-accent);
+    border-radius: var(--ttas-radius-sm);
+    background: var(--ttas-surface-soft);
+}
+
+.ttas-state-guide-lead {
+    margin: 0;
+    color: var(--ttas-muted);
+    font-size: 0.78rem;
+    line-height: 1.45;
+}
+
+.ttas-state-guide-points {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin: 0;
+    padding-left: 18px;
+    color: var(--ttas-muted);
+    font-size: 0.78rem;
+    line-height: 1.45;
+}
+
+.ttas-state-binding {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.ttas-state-binding-head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+.ttas-state-new {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: flex-end;
+}
+
+.ttas-state-new .ttas-field {
+    flex: 1 1 180px;
+    min-width: 0;
+}
+
+.ttas-state-notice {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin: 0;
+    color: var(--ttas-muted);
+    font-size: calc(var(--mainFontSize) * 0.9);
+}
+
+/* One declaration row: the field's own inputs, then its switches.
+   The row list of a card also uses `-fields`, so the column layout lives on a
+   class of its own — the two are not the same thing. */
+.ttas-state-field-row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--ttas-border-soft);
+}
+
+.ttas-state-row-fields {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+.ttas-state-row-fields > .text_pole {
+    flex: 1 1 140px;
+    min-width: 0;
+}
+
+.ttas-state-row-inputs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+.ttas-state-row-inputs > .text_pole {
+    flex: 1 1 140px;
+    min-width: 0;
+}
+
+.ttas-state-row-switches {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+    font-size: calc(var(--mainFontSize) * 0.9);
+}
+
+.ttas-state-row-switch {
+    display: inline-flex;
+    gap: 4px;
+    align-items: center;
+    color: var(--ttas-muted);
+    cursor: pointer;
+}
+
+.ttas-state-row-switch input:checked + span {
+    color: inherit;
+}
+
+.ttas-state-row-switches-hint {
+    color: var(--ttas-muted);
+    font-size: calc(var(--mainFontSize) * 0.85);
+}
+
+.ttas-state-card {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 10px;
+    border: 1px solid var(--ttas-border-soft);
+    border-radius: var(--ttas-radius-sm);
+    background: var(--ttas-surface-soft);
+}
+
+.ttas-state-card-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding-left: 10px;
+    border-left: 2px solid var(--ttas-border-soft);
+}
+
+.ttas-state-images {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.ttas-state-images-head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    justify-content: space-between;
+    color: var(--ttas-muted);
+    font-size: calc(var(--mainFontSize) * 0.9);
+}
+
+.ttas-state-candidate {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+}
+
+.ttas-state-candidate > .text_pole {
+    flex: 1 1 120px;
+    min-width: 0;
+}
+
+.ttas-state-candidate > select {
+    flex: 0 0 auto;
+    width: 96px;
+}
+
+.ttas-state-icon-button {
+    flex: 0 0 auto;
+    padding: 2px 8px;
+}
+
+.ttas-state-script-source {
+    width: 100%;
+    min-height: 72px;
+    font-family: var(--ttas-mono);
+    font-size: calc(var(--mainFontSize) * 0.9);
+    resize: vertical;
+}
+
+.ttas-state-access-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+.ttas-state-access-row > .text_pole:first-child {
+    flex: 1 1 200px;
+    min-width: 0;
+}
+
+.ttas-state-access-row > select {
+    flex: 0 0 auto;
+    width: 132px;
+}
+
+.ttas-state-access-row > input[type="number"] {
+    flex: 0 0 auto;
+    width: 72px;
+}
+
+.ttas-state-script-card {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px;
+    border: 1px solid var(--ttas-border-soft);
+    border-radius: var(--ttas-radius-sm);
+    background: var(--ttas-surface-soft);
+}
+
+.ttas-state-script-head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.ttas-state-script-head code {
+    font-family: var(--ttas-mono);
+}
+
+.ttas-state-script-active {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin: 0;
+    color: var(--ttas-warning);
+    font-size: calc(var(--mainFontSize) * 0.9);
+}
+
+.ttas-state-issues ul {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin: 0;
+    padding-left: 18px;
+}
+
+.ttas-state-issues code {
+    margin-right: 6px;
+    font-family: var(--ttas-mono);
+    opacity: 0.85;
+}
+
+.ttas-state-footer {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    justify-content: flex-end;
+}
+
+.ttas-state-footer .ttas-field-hint {
+    margin-right: auto;
+}
+
+@media screen and (max-width: 980px) {
+    .ttas-state-layout {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+/* State access grid grouping */
+
+.ttas-state-access-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 6px 0;
+    border-bottom: 1px dashed var(--ttas-border-soft);
+}
+
+.ttas-state-access-group:last-of-type {
+    border-bottom: none;
+}
+
+.ttas-state-access-group-toggle {
+    display: inline-flex;
+    gap: 8px;
+    align-items: center;
+    justify-content: flex-start;
+    width: fit-content;
+    font-weight: 600;
+}
+
+/* State machine editor */
+
+.ttas-machine-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+.ttas-machine-row > .text_pole {
+    flex: 1 1 130px;
+    min-width: 0;
+}
+
+.ttas-machine-row > .ttas-field {
+    flex: 1 1 150px;
+    min-width: 0;
+}
+
+.ttas-machine-row > select {
+    flex: 0 0 auto;
+    width: 120px;
+}
+
+.ttas-machine-op {
+    width: 96px !important;
+}
+
+.ttas-machine-priority {
+    flex: 0 1 110px !important;
+}
+
+.ttas-machine-icon-button {
+    flex: 0 0 auto;
+    padding: 2px 8px;
+}
+
+.ttas-machine-card {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 10px;
+    border: 1px solid var(--ttas-border-soft);
+    border-radius: var(--ttas-radius-sm);
+    background: var(--ttas-surface-soft);
+}
+
+.ttas-machine-card-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding-left: 10px;
+    border-left: 2px solid var(--ttas-border-soft);
+}
+
+.ttas-machine-images-head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    justify-content: space-between;
+    color: var(--ttas-muted);
+    font-size: calc(var(--mainFontSize) * 0.9);
+}
+
+.ttas-machine-result {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px;
+    border: 1px dashed var(--ttas-border-soft);
+    border-radius: var(--ttas-radius-sm);
+}
+
+.ttas-machine-result-line {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 0;
+    align-items: baseline;
+}
+
+/* A predicate entry is a stack of rows rather than a grid: content is a
+   textarea and the rest are one-liners, so the card keeps them readable. */
+.ttas-predicate-entry,
+.ttas-predicate-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px;
+    border: 1px solid var(--ttas-border-soft);
+    border-radius: var(--ttas-radius-sm);
+}
+
+.ttas-predicate-entry textarea.text_pole {
+    min-height: 0;
+    resize: vertical;
+}
+
+.ttas-machine-result-block {
+    margin: 0;
+    padding: 8px;
+    border-left: 2px solid var(--ttas-border-soft);
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: inherit;
+    font-size: calc(var(--mainFontSize) * 0.9);
+    color: var(--ttas-muted);
 }

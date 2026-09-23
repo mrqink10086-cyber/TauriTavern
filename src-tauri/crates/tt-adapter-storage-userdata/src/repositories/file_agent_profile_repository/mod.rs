@@ -420,6 +420,7 @@ mod tests {
         AgentProfileDefinition, AgentProfileId, AgentProfileInstructions, AgentRunPolicy,
         AgentSkillPolicy, AgentToolPolicy, AgentWorkspacePolicy,
     };
+    use tt_domain::models::agent::profile::DEFAULT_AGENT_TOOL_UNFOLDED_TURNS;
     use tt_ports::repositories::agent_profile_repository::AgentProfileRepository;
     use tt_ports::repositories::agent_profile_storage_health_repository::{
         AgentProfileStorageHealthRepository, AgentProfileStorageIssueKind,
@@ -645,6 +646,7 @@ mod tests {
                 max_rounds: 1,
                 max_calls_per_run: 1,
                 mcp_result_inline_char_limit: 50_000,
+                unfolded_tool_turns: DEFAULT_AGENT_TOOL_UNFOLDED_TURNS,
                 max_calls_per_tool: BTreeMap::new(),
             },
             skills: AgentSkillPolicy {
@@ -657,6 +659,8 @@ mod tests {
                 visible_roots: vec!["output".to_string()],
                 writable_roots: vec!["output".to_string()],
             },
+            state_access: Default::default(),
+            recall: Default::default(),
             plan: AgentPlanPolicy {
                 mode: AgentPlanMode::None,
                 beta: true,

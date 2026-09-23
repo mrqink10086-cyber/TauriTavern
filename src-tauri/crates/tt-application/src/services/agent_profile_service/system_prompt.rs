@@ -4,8 +4,11 @@ use crate::services::agent_workspace_scope::{
 use tt_domain::models::agent::AgentModelTool;
 use tt_domain::models::agent::profile::ResolvedAgentProfile;
 
+use crate::services::agent_tools::{STATE_DOCUMENT_PATH, STATE_TRANSITION, STATE_UPDATE};
+
 use super::constants::{
-    AGENT_AWAIT_TOOL, AGENT_DELEGATE_TOOL, AGENT_HANDOFF_TOOL, AGENT_LIST_TOOL, TASK_RETURN_TOOL,
+    AGENT_AWAIT_TOOL, AGENT_DELEGATE_TOOL, AGENT_HANDOFF_TOOL, AGENT_LIST_TOOL, PERSISTENT_ROOT,
+    STATE_ROOT, TASK_RETURN_TOOL,
 };
 
 pub fn materialize_agent_system_prompt(
@@ -153,22 +156,40 @@ pub fn materialize_agent_system_prompt(
         ));
     }
 
-    if profile
-        .workspace
-        .visible_roots
-        .iter()
-        .any(|root| root == "persist")
-        && profile
-            .workspace
-            .writable_roots
-            .iter()
-            .any(|root| root == "persist")
-    {
+    if root_is_visible(profile, PERSISTENT_ROOT) && root_is_writable(profile, PERSISTENT_ROOT) {
         lines.push("- Use persist/ to store concise information that should carry over into subsequent runs of the same chat, such as persistent plot facts, unresolved threads, relationship states, and user style preferences.".to_string());
         lines.push(
             "- **Do not** copy full chat history, final replies, tool results, or temporary reasoning into persist/."
                 .to_string(),
         );
+    }
+
+    // The tool is the only writer: it is what checks keys against the chat's
+    // state declaration, so a profile that can write state/ without it is
+    // refused at profile-save time rather than taught a second way in here.
+    if has_tool(tools, STATE_UPDATE) && root_is_writable(profile, STATE_ROOT) {
+        lines.push(format!(
+            "- Use {} to record what changed in this chat's tracked state. Send only the fields that changed: a field you leave out keeps its value, an empty value array clears it, and `remove` deletes it. Keys must be the ones the state declaration defines.",
+            model_alias(tools, STATE_UPDATE)
+        ));
+        lines.push(format!(
+            "- {} is the only writer of {STATE_DOCUMENT_PATH}. **Do not** rewrite that file with the workspace tools: only {} validates the keys.",
+            model_alias(tools, STATE_UPDATE),
+            model_alias(tools, STATE_UPDATE)
+        ));
+        if root_is_visible(profile, STATE_ROOT) && has_tool(tools, "workspace.read_file") {
+            lines.push(format!(
+                "- Read {STATE_DOCUMENT_PATH} with {} first when you need the current values.",
+                model_alias(tools, "workspace.read_file")
+            ));
+        }
+    }
+
+    if has_tool(tools, STATE_TRANSITION) && root_is_writable(profile, STATE_ROOT) {
+        lines.push(format!(
+            "- Use {} to move this chat's state machine when the story itself moves. A move only fires a transition the machine defines from where it currently stands; one it cannot make is reported back to you, not guessed at.",
+            model_alias(tools, STATE_TRANSITION)
+        ));
     }
 
     if has_tool(tools, TASK_RETURN_TOOL) {
@@ -322,6 +343,22 @@ pub fn materialize_agent_system_prompt(
     lines.push("Anyway: TOOLS&SKILLS IS ALL YOU NEED".to_string());
 
     lines.join("\n")
+}
+
+fn root_is_visible(profile: &ResolvedAgentProfile, root: &str) -> bool {
+    profile
+        .workspace
+        .visible_roots
+        .iter()
+        .any(|visible| visible == root)
+}
+
+fn root_is_writable(profile: &ResolvedAgentProfile, root: &str) -> bool {
+    profile
+        .workspace
+        .writable_roots
+        .iter()
+        .any(|writable| writable == root)
 }
 
 fn has_tool(tools: &[AgentModelTool], name: &str) -> bool {

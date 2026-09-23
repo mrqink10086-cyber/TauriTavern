@@ -11,7 +11,9 @@ pub use file_system::DataDirectory;
 pub use repositories::{
     FileAssetRepository, FileChatRepository, FileExtensionStoreRepository, FileGroupRepository,
     FileLlmConnectionRepository, FileMcpServerRepository, FilePromptCacheRepository,
-    FileQuickReplyRepository, FileSecretRepository, FileSettingsRepository, FileThemeRepository,
-    FileUserDirectoryRepository, FileUserEndpointGrantRepository, FileUserRepository,
+    FileQuickReplyRepository, FileSecretRepository, FileSettingsRepository,
+    FileStateDeclarationRepository, FileStateMachineRepository, FileStatePredicateRepository,
+    FileThemeRepository, FileUserDirectoryRepository, FileUserEndpointGrantRepository,
+    FileUserRepository,
     load_tauritavern_settings_blocking,
 };

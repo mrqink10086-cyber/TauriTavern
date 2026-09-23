@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::{AgentRunPresentation, ArtifactSpec};
+use crate::models::state_access::StateAccessPolicy;
 use crate::models::tool::{ToolDescriptionOverride, ToolId};
 
 pub const AGENT_PROFILE_SCHEMA_VERSION: u32 = 3;
@@ -10,6 +11,10 @@ pub const AGENT_PROFILE_KIND: &str = "tauritavern.agentProfile";
 pub const DEFAULT_AGENT_PROFILE_ID: &str = "default-writer";
 pub const DEFAULT_AGENT_TOOL_MAX_ROUNDS: usize = 80;
 pub const DEFAULT_AGENT_TOOL_MAX_CALLS_PER_RUN: usize = 80;
+/// Newest tool turns that keep their native protocol shape inside a run; older
+/// ones fold into plain text. Two is enough to leave the model a live example
+/// of the calling convention without paying the shell of every past round.
+pub const DEFAULT_AGENT_TOOL_UNFOLDED_TURNS: usize = 2;
 pub const DEFAULT_AGENT_MCP_RESULT_INLINE_CHAR_LIMIT: usize = 50_000;
 pub const DEFAULT_AGENT_SKILL_MAX_READ_CHARS_PER_CALL: usize = 20_000;
 pub const DEFAULT_AGENT_SKILL_MAX_READ_CHARS_PER_RUN: usize = 80_000;
@@ -104,6 +109,15 @@ pub struct AgentProfileDefinition {
     pub tools: AgentToolPolicy,
     pub skills: AgentSkillPolicy,
     pub workspace: AgentWorkspacePolicy,
+    /// Per-field access to the chat's state: inject, retrieve, or write.
+    ///
+    /// The default is an empty policy, which means "not configured yet" and
+    /// constrains nothing — the same reading an empty declaration gets.
+    #[serde(default)]
+    pub state_access: StateAccessPolicy,
+    /// What this Agent does with the chat's recall blocks.
+    #[serde(default)]
+    pub recall: AgentRecallPolicy,
     pub plan: super::plan::AgentPlanPolicy,
     pub output: AgentOutputPolicy,
 }
@@ -128,6 +142,10 @@ pub struct ResolvedAgentProfile {
     pub tools: ResolvedAgentToolPolicy,
     pub skills: AgentSkillPolicy,
     pub workspace: AgentWorkspacePolicy,
+    #[serde(default)]
+    pub state_access: StateAccessPolicy,
+    #[serde(default)]
+    pub recall: AgentRecallPolicy,
     pub plan: super::plan::AgentPlanPolicy,
     pub output: ResolvedAgentOutputPolicy,
     pub source_trace: AgentProfileSourceTrace,
@@ -202,6 +220,130 @@ pub struct AgentContextPolicy {
     pub initial_chat_history_messages: i64,
     #[serde(default = "default_agent_include_activated_world_info")]
     pub include_activated_world_info: bool,
+    /// Per-entry exceptions to that switch.
+    #[serde(default)]
+    pub world_info: AgentWorldInfoPolicy,
+}
+
+/// Which World Info entries this Agent may be told about.
+///
+/// The switch above answers for every entry the chat activated; a rule here is an
+/// exception for one entry, in both directions. Rows exist because fixed material
+/// that suits a world book — a style sheet, a house rule, a format — is awkward
+/// anywhere else: a Skill has to be read on purpose, and anything the model
+/// summarises on the way in is no longer the text that was written.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentWorldInfoPolicy {
+    #[serde(default)]
+    pub entries: Vec<AgentWorldInfoEntryRule>,
+    /// Whether a delegated invocation carries the run's activated entries.
+    ///
+    /// Off by default, and off is what a SubAgent gets today: it starts from a
+    /// prompt of its own — a system prompt and the task — so it reads World Info
+    /// only if someone says it should. On, it carries them all unless a row below
+    /// says otherwise.
+    #[serde(default)]
+    pub subagent_inherits: bool,
+}
+
+/// One entry, named the way the scan names it: its book and its uid.
+///
+/// A comment is a title a human wrote and may repeat; the pair does not.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentWorldInfoEntryRule {
+    pub book: String,
+    pub uid: u64,
+    /// Whether the entry is injected for this Agent.
+    pub inject: bool,
+}
+
+/// What an Agent does with the recall blocks a chat's extensions produced.
+///
+/// A block is written before a run starts and frozen with the rest of its input,
+/// so every invocation of that run reads the same text. That is why nothing here
+/// can ask for another recall: the question was already answered against the same
+/// index with the same context, and asking again would buy the same answer for
+/// another round trip and one more chance for the two to disagree. What is
+/// per-Agent is only whether a prompt carries what was recalled.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentRecallPolicy {
+    /// Whether this Agent's own prompt carries the blocks.
+    #[serde(default = "default_agent_recall_inject")]
+    pub inject: bool,
+    /// Which extension prompts count as recall.
+    ///
+    /// A key, or a prefix when it ends in `*`: one recall extension writes under
+    /// several keys (its own tag, one per position group, one per channel), and a
+    /// prefix names all of them at once. Only these are the Agent's to place or
+    /// drop — everything else an extension injects is that extension's business.
+    #[serde(default = "default_agent_recall_sources")]
+    pub sources: Vec<String>,
+    /// What a delegated invocation does with the blocks its parent already has.
+    #[serde(default)]
+    pub subagent: AgentRecallInheritance,
+}
+
+/// What a delegated invocation does with the recall blocks it inherited.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentRecallInheritance {
+    /// Carry them through: the sub-agent is answering about the same story.
+    Inherit,
+    /// Drop them: the work is narrow, and the parent's recall is noise in it.
+    ///
+    /// The default, because a delegated task carries what it needs in its own
+    /// prompt and because a recall block is the largest thing a sub-agent
+    /// inherits that it has no way to use.
+    #[default]
+    Skip,
+}
+
+/// The recall extension this installation is built for, by its prompt tag.
+///
+/// A default rather than a rule: `sources` is the Agent's to change, and an
+/// installation running a different recall extension names it instead.
+pub const DEFAULT_RECALL_SOURCE: &str = "3_vectfox*";
+
+fn default_agent_recall_inject() -> bool {
+    true
+}
+
+fn default_agent_recall_sources() -> Vec<String> {
+    vec![DEFAULT_RECALL_SOURCE.to_string()]
+}
+
+impl Default for AgentRecallPolicy {
+    fn default() -> Self {
+        Self {
+            inject: default_agent_recall_inject(),
+            sources: default_agent_recall_sources(),
+            subagent: AgentRecallInheritance::default(),
+        }
+    }
+}
+
+impl AgentRecallPolicy {
+    /// Whether that extension prompt key is one of this Agent's recall blocks.
+    pub fn matches_source(&self, key: &str) -> bool {
+        let key = key.trim();
+        !key.is_empty()
+            && self
+                .sources
+                .iter()
+                .any(|source| matches_source(source, key))
+    }
+}
+
+/// A source that ends in `*` is a prefix; anything else is the whole key.
+pub fn matches_source(source: &str, key: &str) -> bool {
+    let source = source.trim();
+    match source.strip_suffix('*') {
+        Some(prefix) => key.starts_with(prefix),
+        None => key == source,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -269,6 +411,11 @@ pub struct AgentToolPolicy<T = String> {
     pub max_calls_per_run: usize,
     #[serde(default = "default_agent_mcp_result_inline_char_limit")]
     pub mcp_result_inline_char_limit: usize,
+    /// How many of the newest tool turns stay in native protocol format when
+    /// an in-run transcript is compacted. `1` is the effective floor: folding
+    /// the newest turn would leave tool calls unanswered.
+    #[serde(default = "default_agent_tool_unfolded_turns")]
+    pub unfolded_tool_turns: usize,
     #[serde(default)]
     pub max_calls_per_tool: BTreeMap<T, usize>,
 }
@@ -346,6 +493,10 @@ fn default_agent_mcp_result_inline_char_limit() -> usize {
     DEFAULT_AGENT_MCP_RESULT_INLINE_CHAR_LIMIT
 }
 
+fn default_agent_tool_unfolded_turns() -> usize {
+    DEFAULT_AGENT_TOOL_UNFOLDED_TURNS
+}
+
 fn default_agent_skill_max_read_chars_per_call() -> usize {
     DEFAULT_AGENT_SKILL_MAX_READ_CHARS_PER_CALL
 }
@@ -404,6 +555,7 @@ impl Default for AgentContextPolicy {
         Self {
             initial_chat_history_messages: DEFAULT_AGENT_INITIAL_CHAT_HISTORY_MESSAGES,
             include_activated_world_info: true,
+            world_info: AgentWorldInfoPolicy::default(),
         }
     }
 }
@@ -438,7 +590,7 @@ mod tests {
         DEFAULT_AGENT_INITIAL_CHAT_HISTORY_MESSAGES, DEFAULT_AGENT_MCP_RESULT_INLINE_CHAR_LIMIT,
         DEFAULT_AGENT_MODEL_MAX_RETRIES, DEFAULT_AGENT_MODEL_RETRY_INTERVAL_MS,
         DEFAULT_AGENT_SKILL_MAX_READ_CHARS_PER_CALL, DEFAULT_AGENT_SKILL_MAX_READ_CHARS_PER_RUN,
-        DEFAULT_AGENT_TOOL_MAX_CALLS_PER_RUN,
+        DEFAULT_AGENT_TOOL_MAX_CALLS_PER_RUN, DEFAULT_AGENT_TOOL_UNFOLDED_TURNS,
     };
     use crate::models::agent::plan::DEFAULT_AGENT_PLAN_BETA;
 
@@ -538,6 +690,10 @@ mod tests {
             DEFAULT_AGENT_MCP_RESULT_INLINE_CHAR_LIMIT
         );
         assert!(profile.tools.max_calls_per_tool.is_empty());
+        assert_eq!(
+            profile.tools.unfolded_tool_turns,
+            DEFAULT_AGENT_TOOL_UNFOLDED_TURNS
+        );
         assert!(profile.skills.deny.is_empty());
         assert_eq!(
             profile.skills.max_read_chars_per_call,

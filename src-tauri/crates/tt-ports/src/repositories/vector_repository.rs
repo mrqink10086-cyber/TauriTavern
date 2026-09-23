@@ -45,6 +45,19 @@ pub struct VectorMetadata {
     pub hash: i64,
     pub text: String,
     pub index: i64,
+    /// The floor this record was published at, for channels that have one.
+    ///
+    /// Absent until the chat message that carries the version is saved: the
+    /// backend publishes a state version before the frontend knows which floor
+    /// it landed on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub floor: Option<i64>,
+    /// The state key a state-history record belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field_key: Option<String>,
+    /// What kind of object the record is: `fact`, `event`, `summary`, `chunk`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -189,5 +202,48 @@ mod tests {
             assert!(!profiles[..index].contains(profile));
         }
         assert!(LocalEmbeddingModel::from_id("unknown").is_none());
+    }
+
+    #[test]
+    fn metadata_stored_before_the_recall_fields_still_decodes() {
+        let decoded: VectorMetadata =
+            serde_json::from_str(r#"{"hash":7,"text":"a fact","index":3}"#)
+                .expect("a database written by an older version must keep decoding");
+
+        assert_eq!(decoded.hash, 7);
+        assert!(decoded.floor.is_none(), "a floor that was never bound is absent");
+        assert!(decoded.field_key.is_none());
+        assert!(decoded.kind.is_none());
+    }
+
+    #[test]
+    fn recall_fields_round_trip_without_changing_other_records() {
+        let fact = VectorMetadata {
+            hash: 1,
+            text: "时间 (环境/时间): 夜晚".to_string(),
+            index: 2,
+            floor: Some(9),
+            field_key: Some("环境/时间".to_string()),
+            kind: Some("fact".to_string()),
+        };
+        let encoded = serde_json::to_string(&fact).expect("a fact must encode");
+        assert_eq!(
+            serde_json::from_str::<VectorMetadata>(&encoded).expect("a fact must decode"),
+            fact
+        );
+
+        let chunk = VectorMetadata {
+            hash: 1,
+            text: "t".to_string(),
+            index: 2,
+            floor: None,
+            field_key: None,
+            kind: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&chunk).expect("a chunk must encode"),
+            r#"{"hash":1,"text":"t","index":2}"#,
+            "a record written for the vectors extension keeps the wire shape it already had"
+        );
     }
 }

@@ -13,6 +13,7 @@ use tt_application::services::chat_completion_service::ChatCompletionService;
 use tt_application::services::llm_connection_service::LlmConnectionService;
 use tt_application::services::mcp_service::McpService;
 use tt_application::services::prompt_assembly_service::PromptAssemblyService;
+use tt_application::services::recall_service::RecallService;
 use tt_application::services::skill_service::SkillService;
 use tt_ports::skill_script::SkillScriptEngine;
 
@@ -26,6 +27,7 @@ pub(super) struct AgentServices {
     pub(super) agent_run_retention_automation_service: Arc<AgentRunRetentionAutomationService>,
     pub(super) agent_runtime_service: Arc<AgentRuntimeService>,
     pub(super) agent_workspace_lifecycle_service: Arc<AgentWorkspaceLifecycleService>,
+    pub(super) recall_service: Arc<RecallService>,
 }
 
 pub(super) fn build(
@@ -51,6 +53,11 @@ pub(super) fn build(
         repositories.preset_repository.clone(),
         llm_connection_service.clone(),
     ));
+    let recall_service = Arc::new(RecallService::new(
+        repositories.recall_repository.clone(),
+        repositories.vector_repository.clone(),
+        repositories.local_embedding_repository.clone(),
+    ));
     let agent_runtime_service = Arc::new(AgentRuntimeService::new(
         repositories.agent_run_repository.clone(),
         repositories.agent_invocation_repository.clone(),
@@ -66,7 +73,12 @@ pub(super) fn build(
         prompt_assembly_service.clone(),
         mcp_service,
         skill_script_engine,
+        recall_service.clone(),
     ));
+    // A scene may ask for its ceilings counted in tokens, and the vocabulary it
+    // counts with is the same one the rest of the app uses.
+    agent_runtime_service.set_state_tokenizer(repositories.tokenizer_repository.clone());
+
     let agent_run_history_service = Arc::new(AgentRunHistoryService::new(
         repositories.agent_run_repository.clone(),
         repositories.settings_repository.clone(),
@@ -91,5 +103,6 @@ pub(super) fn build(
         agent_run_retention_automation_service,
         agent_runtime_service,
         agent_workspace_lifecycle_service,
+        recall_service,
     }
 }

@@ -25,6 +25,7 @@ import { t } from './i18n.js';
 import { accountStorage } from './util/AccountStorage.js';
 import { getOrCreatePersonaDescriptor, setPersonaDescription, user_avatar } from './personas.js';
 import { normalizeWorldInfoActivationBatch } from './tauritavern/agent/world-info-activation.js';
+import { agentEntryCarriersAvailable, loadAgentEntryCarriers, setAgentEntryCarrier } from './tauritavern/agent/world-info-entry-agents.js';
 import { registerLifecycleFlushHandler } from '../tauri/main/services/lifecycle/lifecycle-flush-service.js';
 import { canPrefetchWorldInfoTokenCount, getWorldInfoTokenPrefetchBatch } from './world-info-token-prefetch.js';
 import { prepareWorldInfoEntries } from './world-info-entry-prepare.js';
@@ -252,6 +253,7 @@ const KNOWN_DECORATORS = ['@@activate', '@@dont_activate'];
  * @property {Array} anBefore - Array of entries before Author's Note
  * @property {Array} anAfter - Array of entries after Author's Note
  * @property {{[key: string]: string[]}} outletEntries - Array of entries to be added to an outlet
+ * @property {{ timestampMs: number, trigger: string, entries: Array<{ world: string, uid: number | string, displayName: string, constant: boolean, content: string, position?: string }> }} worldInfoActivation - What this scan activated, carried whole; the host trims `content` into a preview for the Agent panel
  */
 
 /**
@@ -985,14 +987,14 @@ const worldInfoInFlight = new Map();
  * @param {WIGlobalScanData} [globalScanData=defaultGlobalScanData] Chat independent context to be scanned
  * @returns {Promise<WIPromptResult>} The world info string and depth.
  */
-export async function getWorldInfoPrompt(chat, maxContext, isDryRun, globalScanData) {
+export async function getWorldInfoPrompt(chat, maxContext, isDryRun, globalScanData, entryFilter = null) {
     if (globalScanData === undefined) {
         globalScanData = defaultGlobalScanData;
     }
 
     let worldInfoString = '', worldInfoBefore = '', worldInfoAfter = '';
 
-    const activatedWorldInfo = await checkWorldInfo(chat, maxContext, isDryRun, globalScanData);
+    const activatedWorldInfo = await checkWorldInfo(chat, maxContext, isDryRun, globalScanData, entryFilter);
     worldInfoBefore = activatedWorldInfo.worldInfoBefore;
     worldInfoAfter = activatedWorldInfo.worldInfoAfter;
     worldInfoString = worldInfoBefore + worldInfoAfter;
@@ -2114,20 +2116,17 @@ function registerWorldInfoSlashCommands() {
 }
 
 
-/**
- * Loads the given world into the World Editor.
- *
- * @param {string} name - The name of the world
- * @return {Promise<void>} A promise that resolves when the world editor is loaded
- */
 function resetWorldInfoEditorSearch() {
     $('#world_info_search').val('');
     worldInfoFilter.setFilterData(FILTER_TYPES.WORLD_INFO_SEARCH, '', true);
 }
 
 /**
- * @param {string} name
+ * Loads the given world into the World Editor.
+ *
+ * @param {string} name The name of the world
  * @param {{ navigation?: number | string; flashOnNav?: boolean; wiData?: any; syncSelection?: boolean }} [options]
+ * @return {Promise<boolean>} Whether the world was loaded into the editor
  */
 async function renderWorldInfoEditor(name, options = {}) {
     const worldName = String(name ?? '');
@@ -2534,6 +2533,12 @@ function clearEntryList($list) {
 }
 
 //MARK: displayWorldEntries
+/**
+ * @param {string} name
+ * @param {any} data
+ * @param {number|string} [navigation] The entry to navigate to: its uid, or a navigation_option.
+ * @param {boolean} [flashOnNav]
+ */
 async function displayWorldEntries(name, data, navigation = navigation_option.none, flashOnNav = true) {
     updateEditor = async (navigation, flashOnNav = true) => await displayWorldEntries(name, data, navigation, flashOnNav);
 
@@ -2555,7 +2560,7 @@ async function displayWorldEntries(name, data, navigation = navigation_option.no
     // Regardless of whether success is displayed or not. Make sure the delete button is available.
     // Do not put this code behind.
     $('#world_popup_delete').off('click').on('click', async () => {
-        const confirmation = await Popup.show.confirm(`Delete the World/Lorebook: "${name}"?`, 'This action is irreversible!');
+        const confirmation = await Popup.show.confirm(`Delete the World/Lorebook: "${escapeHtml(name)}"?`, 'This action is irreversible!');
         if (!confirmation) {
             return;
         }
@@ -3501,6 +3506,80 @@ function setCommentPlaceholder(keys, commentInput) {
 }
 
 /**
+ * Builds the per-entry Agent injection block for the entry editor.
+ *
+ * Which Agents read an entry is a decision about the entry, and the Agent list
+ * is known without a run, so it is offered here rather than behind the last
+ * activation readout in the Agent panel.
+ *
+ * @param {string} book - The name of the world info file the entry lives in.
+ * @param {object} entry - The entry object being edited.
+ * @returns {JQuery<HTMLElement>|null} Null when the Agent profile channel is unavailable.
+ */
+function buildAgentCarrierBlock(book, entry) {
+    if (!agentEntryCarriersAvailable()) {
+        return null;
+    }
+
+    const entryRef = { world: book, uid: entry.uid };
+    const block = $(`
+        <div class="world_entry_form_control wi-agent-carriers">
+            <small class="textAlignCenter" data-i18n="Agent Injection">Agent Injection</small>
+            <div class="wi-agent-carrier-list"></div>
+            <small class="wi-agent-carrier-hint"></small>
+        </div>
+    `);
+    const list = block.find('.wi-agent-carrier-list');
+    const hint = block.find('.wi-agent-carrier-hint');
+
+    const render = (carriers) => {
+        list.empty();
+        hint.text(t`Untouched follows each Agent's own switch; ticking one pins this entry for that Agent.`);
+        for (const carrier of carriers) {
+            const row = $(`
+                <label class="checkbox flex-container alignitemscenter flexNoGap">
+                    <input type="checkbox" />
+                    <span></span>
+                </label>
+            `);
+            const input = row.find('input');
+            input.prop('checked', carrier.carried);
+            input.prop('disabled', carrier.builtin);
+            row.find('span').text(carrier.exceptional
+                ? `${carrier.displayName} — ${t`Exception`}`
+                : carrier.displayName);
+
+            input.on('change', async function () {
+                const carried = $(this).prop('checked');
+                input.prop('disabled', true);
+                try {
+                    await setAgentEntryCarrier(entryRef, carrier.profileId, carried);
+                } catch (error) {
+                    console.error('Failed to update Agent world info exception:', error);
+                    toastr.error(String(error?.message ?? error), t`Agent Injection`);
+                    input.prop('checked', !carried);
+                } finally {
+                    input.prop('disabled', carrier.builtin);
+                }
+            });
+
+            list.append(row);
+        }
+    };
+
+    hint.text(t`Loading Agents…`);
+    loadAgentEntryCarriers(entryRef)
+        .then(render)
+        .catch((error) => {
+            console.error('Failed to load Agent world info exceptions:', error);
+            list.empty();
+            hint.text(String(error?.message ?? error));
+        });
+
+    return block;
+}
+
+/**
  * Main function to build the WI entry editor template.
  * @param {string} name - The name of the world info file.
  * @param {object} data - The world info data object.
@@ -3689,7 +3768,8 @@ export async function getWorldEntry(name, data, entry) {
             clearTimeout(drawerDestroyTimeout);
             drawerDestroyTimeout = null;
         }
-        const open = event.originalEvent?.detail?.open ?? editOutlet.is(':visible');
+        const toggle = /** @type {CustomEvent<{ open?: boolean }> | undefined} */ (event.originalEvent);
+        const open = toggle?.detail?.open ?? editOutlet.is(':visible');
         if (!open) {
             commitContent();
             drawerDestroyTimeout = setTimeout(() => {
@@ -4019,11 +4099,17 @@ export async function getWorldEntry(name, data, entry) {
         });
         ignoreBudgetInput.prop('checked', entry.ignoreBudget ?? false).trigger('input', { noSave: true });
 
+        // Agent injection exceptions
+        const agentCarrierBlock = buildAgentCarrierBlock(name, entry);
+        if (agentCarrierBlock) {
+            editTemplate.append(agentCarrierBlock);
+        }
+
         countTokensDebounced(counter, contentInput.val());
 
         editTemplate.find('.inline-drawer-content').css('display', 'none');
         editOutlet.append(editTemplate);
-        void mountCodeMirrorEditor(contentInput[0], {
+        void mountCodeMirrorEditor(/** @type {HTMLTextAreaElement} */ (contentInput[0]), {
             onChange: () => {
                 clearTimeout(contentCommitTimeout);
                 contentCommitTimeout = setTimeout(commitContent, debounce_timeout.relaxed);
@@ -4945,11 +5031,11 @@ function parseDecorators(content) {
  * @returns {Promise<WIActivated>} The world info activated.
  */
 //MARK: checkWorldInfo
-export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData = defaultGlobalScanData) {
-    return checkWorldInfoInternal(chat, maxContext, isDryRun, globalScanData);
+export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData = defaultGlobalScanData, entryFilter = null) {
+    return checkWorldInfoInternal(chat, maxContext, isDryRun, globalScanData, entryFilter);
 }
 
-async function checkWorldInfoInternal(chat, maxContext, isDryRun, globalScanData) {
+async function checkWorldInfoInternal(chat, maxContext, isDryRun, globalScanData, entryFilter = null) {
     const context = getContext();
     const buffer = new WorldInfoBuffer(chat, globalScanData);
 
@@ -5457,7 +5543,12 @@ async function checkWorldInfoInternal(chat, maxContext, isDryRun, globalScanData
 
     // Appends from insertion order 999 to 1. Use unshift for this purpose
     // TODO (kingbri): Change to use WI Anchor positioning instead of separate top/bottom arrays
-    [...allActivatedEntries.values()].sort(sortFn).forEach((entry) => {
+    // What goes into the prompt is what the caller allows; what activated stays
+    // whole, because the scan answers a question about the chat, not about one
+    // Agent. A run's activation record is what a SubAgent picks its own entries
+    // out of, so an entry this caller refused must not vanish from it.
+    const injectableEntries = [...allActivatedEntries.values()].filter((entry) => !entryFilter || entryFilter(entry));
+    injectableEntries.sort(sortFn).forEach((entry) => {
         const regexDepth = entry.position === world_info_position.atDepth ? (entry.depth ?? DEFAULT_DEPTH) : null;
         const content = getRegexedString(entry.content, regex_placement.WORLD_INFO, { depth: regexDepth, isMarkdown: false, isPrompt: true });
 
@@ -5660,7 +5751,17 @@ function filterByInclusionGroups(newEntries, allActivatedEntries, buffer, scanSt
         return;
     }
 
-    const removeEntry = (entry) => newEntries.splice(newEntries.indexOf(entry), 1);
+    // An entry can belong to several groups (a comma-separated `group`), and
+    // `grouped` is a snapshot taken before any removal. So by the time a later
+    // group is processed the entry may already be gone — and splice(-1, 1)
+    // would silently drop the last element of the array instead. Only remove
+    // what is actually still there.
+    const removeEntry = (entry) => {
+        const index = newEntries.indexOf(entry);
+        if (index !== -1) {
+            newEntries.splice(index, 1);
+        }
+    };
     function removeAllBut(group, chosen, logging = true) {
         for (const entry of group) {
             if (entry === chosen) {
@@ -6002,7 +6103,9 @@ export async function importEmbeddedWorldInfo(skipPopup = false) {
     const bookName = characters[chid]?.data?.character_book?.name || `${characters[chid]?.name}'s Lorebook`;
 
     if (!skipPopup) {
-        const confirmation = await Popup.show.confirm(t`Are you sure you want to import '${bookName}'?`, world_names.includes(bookName) ? t`It will overwrite the World/Lorebook with the same name.` : '');
+        // bookName comes from the character card; escape it because it is interpolated
+        // into the popup's HTML header.
+        const confirmation = await Popup.show.confirm(t`Are you sure you want to import '${escapeHtml(bookName)}'?`, world_names.includes(bookName) ? t`It will overwrite the World/Lorebook with the same name.` : '');
         if (!confirmation) {
             return;
         }

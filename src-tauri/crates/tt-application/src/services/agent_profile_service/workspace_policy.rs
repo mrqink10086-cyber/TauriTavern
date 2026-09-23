@@ -6,7 +6,7 @@ use tt_domain::models::agent::{
     WorkspaceRootScope, WorkspaceRootSpec,
 };
 
-use super::constants::WORKSPACE_ROOT_UNIVERSE;
+use super::constants::{PERSISTENT_WORKSPACE_ROOTS, WORKSPACE_ROOT_UNIVERSE};
 use crate::services::agent_workspace_scope::AGENT_TOOL_RESULTS_ROOT;
 
 pub fn workspace_roots_from_profile(profile: &ResolvedAgentProfile) -> Vec<WorkspaceRootSpec> {
@@ -26,7 +26,7 @@ pub fn workspace_roots_from_profile(profile: &ResolvedAgentProfile) -> Vec<Works
     let mut roots = WORKSPACE_ROOT_UNIVERSE
         .iter()
         .map(|root| {
-            if *root == "persist" {
+            if PERSISTENT_WORKSPACE_ROOTS.contains(root) {
                 WorkspaceRootSpec {
                     path: root.to_string(),
                     lifecycle: WorkspaceRootLifecycle::Persistent,

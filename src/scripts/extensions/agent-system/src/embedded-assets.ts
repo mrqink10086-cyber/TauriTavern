@@ -9,16 +9,44 @@ import type {
 } from './EmbeddedAssetsContract';
 import {
     EMBEDDED_SKILL_ARCHIVE_FORMAT,
+    embeddedMachineSummary,
+    embeddedPredicateSummary,
     embeddedProfileSummary,
     embeddedSkillSummary,
+    portableEmbeddedMachine,
+    portableEmbeddedPredicate,
     portableEmbeddedProfile,
+    readEmbeddedMachinePackage,
+    readEmbeddedPredicatePackage,
     readEmbeddedProfilePackage,
     readEmbeddedSkillPackage,
+    type EmbeddedMachinePackage,
+    type EmbeddedPredicatePackage,
     type EmbeddedProfilePackage,
     type EmbeddedSkillPackage,
+    type EmbeddedStatePackage,
+    type StoredEmbeddedMachineItem,
+    type StoredEmbeddedPredicateItem,
     type StoredEmbeddedProfileItem,
     type StoredEmbeddedSkillItem,
 } from './embedded-asset-packages';
+import {
+    embedNamedItem,
+    readEmbeddedNamedItems,
+    removeEmbeddedNamedItem,
+    type NamedAssetCarrier,
+    type NamedAssetKind,
+} from './embedded-named-assets';
+import {
+    embedScene,
+    readEmbeddedScenes,
+    removeEmbeddedScene,
+    type SceneCarrier,
+} from './embedded-scene-assets';
+import { getStateMachine } from './state-machine-api';
+import type { MachineSpec } from './state-machine-model';
+import { getStatePredicateSet } from './state-predicate-api';
+import type { StatePredicateSet } from './state-predicate-model';
 import {
     assertCharacterAvatarFileName,
     characterStemFromAvatarFileName,
@@ -278,6 +306,56 @@ function readSkillPackage(target: ResolvedTarget): EmbeddedSkillPackage {
     return readEmbeddedSkillPackage(target.character?.data?.extensions?.tauritavern?.skills);
 }
 
+/**
+ * Where this target keeps one carriable document.
+ *
+ * The one place that knows the difference between a preset's extension field and
+ * a card's extension block; every asset module only gets the two calls it needs.
+ */
+function extensionCarrier<TPackage>(target: ResolvedTarget, key: string): NamedAssetCarrier<TPackage> {
+    if (target.kind === TARGET_KIND.PRESET) {
+        return {
+            read: () => target.presetManager.readPresetExtensionField({
+                name: target.name,
+                path: `tauritavern.${key}`,
+            }),
+            write: async (packageValue) => {
+                await target.presetManager.writePresetExtensionField({
+                    name: target.name,
+                    path: `tauritavern.${key}`,
+                    value: packageValue,
+                });
+            },
+        };
+    }
+    return {
+        read: () => target.character?.data?.extensions?.tauritavern?.[key],
+        write: (packageValue) => writeCharacterTauriTavernPatch(target, { [key]: packageValue }),
+    };
+}
+
+function stateCarrier(target: ResolvedTarget): SceneCarrier {
+    return extensionCarrier<EmbeddedStatePackage>(target, 'stateDeclarations');
+}
+
+const MACHINE_ASSETS: NamedAssetKind<StoredEmbeddedMachineItem, MachineSpec> = {
+    readPackage: readEmbeddedMachinePackage,
+    itemOf: portableEmbeddedMachine,
+};
+
+const PREDICATE_ASSETS: NamedAssetKind<StoredEmbeddedPredicateItem, StatePredicateSet> = {
+    readPackage: readEmbeddedPredicatePackage,
+    itemOf: portableEmbeddedPredicate,
+};
+
+function machineCarrier(target: ResolvedTarget): NamedAssetCarrier<EmbeddedMachinePackage> {
+    return extensionCarrier<EmbeddedMachinePackage>(target, 'stateMachines');
+}
+
+function predicateCarrier(target: ResolvedTarget): NamedAssetCarrier<EmbeddedPredicatePackage> {
+    return extensionCarrier<EmbeddedPredicatePackage>(target, 'statePredicates');
+}
+
 function findCharacterJsonDataField(): HTMLInputElement | null {
     if (typeof document === 'undefined') {
         return null;
@@ -379,6 +457,9 @@ export function readEmbeddedAssets(targetInput: EmbeddedAssetTargetInput): Embed
         target: targetSummary(target),
         profiles: readProfilePackage(target).items.map(embeddedProfileSummary),
         skills: readSkillPackage(target).items.map(embeddedSkillSummary),
+        states: readEmbeddedScenes(stateCarrier(target)),
+        machines: readEmbeddedNamedItems(machineCarrier(target), MACHINE_ASSETS).map(embeddedMachineSummary),
+        predicates: readEmbeddedNamedItems(predicateCarrier(target), PREDICATE_ASSETS).map(embeddedPredicateSummary),
     };
 }
 
@@ -395,6 +476,20 @@ export async function embedSkill(
     const target = resolveTarget(targetInput);
     const next = upsertSkill(readSkillPackage(target), await buildEmbeddedSkillItem(skillRef));
     await writeSkills(target, next);
+}
+
+export async function embedState(targetInput: EmbeddedAssetTargetInput, stateName: string): Promise<string> {
+    return await embedScene(stateCarrier(resolveTarget(targetInput)), stateName);
+}
+
+export async function embedMachine(targetInput: EmbeddedAssetTargetInput, machineName: string): Promise<string> {
+    const target = resolveTarget(targetInput);
+    return await embedNamedItem(machineCarrier(target), MACHINE_ASSETS, machineName, getStateMachine);
+}
+
+export async function embedPredicateSet(targetInput: EmbeddedAssetTargetInput, setName: string): Promise<string> {
+    const target = resolveTarget(targetInput);
+    return await embedNamedItem(predicateCarrier(target), PREDICATE_ASSETS, setName, getStatePredicateSet);
 }
 
 export async function embedSkillForScope(scope: TauriTavernSkillScope, skillName: string): Promise<void> {
@@ -414,6 +509,18 @@ export async function removeEmbeddedProfile(targetInput: EmbeddedAssetTargetInpu
 export async function removeEmbeddedSkill(targetInput: EmbeddedAssetTargetInput, skillName: string): Promise<void> {
     const target = resolveTarget(targetInput);
     await writeSkills(target, removeSkill(readSkillPackage(target), skillName));
+}
+
+export async function removeEmbeddedState(targetInput: EmbeddedAssetTargetInput, stateName: string): Promise<void> {
+    await removeEmbeddedScene(stateCarrier(resolveTarget(targetInput)), stateName);
+}
+
+export async function removeEmbeddedMachine(targetInput: EmbeddedAssetTargetInput, machineName: string): Promise<void> {
+    await removeEmbeddedNamedItem(machineCarrier(resolveTarget(targetInput)), MACHINE_ASSETS, machineName);
+}
+
+export async function removeEmbeddedPredicateSet(targetInput: EmbeddedAssetTargetInput, setName: string): Promise<void> {
+    await removeEmbeddedNamedItem(predicateCarrier(resolveTarget(targetInput)), PREDICATE_ASSETS, setName);
 }
 
 export async function removeEmbeddedSkillForScope(scope: TauriTavernSkillScope, skillName: string): Promise<void> {

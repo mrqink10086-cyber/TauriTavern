@@ -1,5 +1,4 @@
 import { WORKSPACE_ROOTS } from './constants';
-import type { AgentSystemPanelController } from './AgentSystemPanelController';
 import {
     isBuiltinProfile,
     parseNumberInput,
@@ -7,6 +6,7 @@ import {
     type AgentSystemPanelSnapshot,
     type Tr,
 } from './AgentSystemPanelContract';
+import type { AgentSystemPanelController } from './AgentSystemPanelController';
 
 export type ProfileSectionProps = {
     snapshot: AgentSystemPanelSnapshot;

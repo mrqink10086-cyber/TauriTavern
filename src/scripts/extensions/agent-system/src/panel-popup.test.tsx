@@ -140,7 +140,8 @@ test('popup opens synchronously, focuses the singleton, and cleans every close p
             firstDialog?.dispatchEvent(cancel);
         });
         expect(cancel.defaultPrevented).toBe(true);
-        expect(document.querySelector('dialog.ttas-dialog')).toBeNull();
+        // Closing asks about pending edits first, so it settles a tick later.
+        await waitFor(() => expect(document.querySelector('dialog.ttas-dialog')).toBeNull());
 
         await act(async () => {
             resolveSettings?.({ found: false });
@@ -154,7 +155,7 @@ test('popup opens synchronously, focuses the singleton, and cleans every close p
         }
         await waitFor(() => expect(secondDialog.querySelector('.ttas-panel-body')).not.toBeNull());
         await userEvent.setup().click(within(secondDialog).getByTitle('Close'));
-        expect(document.querySelector('dialog.ttas-dialog')).toBeNull();
+        await waitFor(() => expect(document.querySelector('dialog.ttas-dialog')).toBeNull());
 
         Object.defineProperty(HTMLDialogElement.prototype, 'showModal', {
             configurable: true,

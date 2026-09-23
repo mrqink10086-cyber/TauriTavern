@@ -175,6 +175,27 @@ impl AgentRuntimeService {
         Ok(())
     }
 
+    /// Mark runs left behind by a previous process as failed.
+    ///
+    /// A checkpoint is only written once a run reaches its terminal state, so a
+    /// run found in a non-terminal state at startup has nothing to resume from —
+    /// and both the history list (terminal runs only) and retention ignore it.
+    /// Marking it failed makes it visible and reclaimable instead of leaving it
+    /// to sit there for the life of the installation.
+    pub async fn fail_runs_left_by_a_previous_process(&self) -> Result<usize, ApplicationError> {
+        let mut failed = 0;
+        for mut run in self.run_repository.list_all_runs().await? {
+            if run.status.is_terminal() || self.active_runs.read().await.contains_key(&run.id) {
+                continue;
+            }
+            run.status = AgentRunStatus::Failed;
+            run.updated_at = chrono::Utc::now();
+            self.run_repository.save_run(&run).await?;
+            failed += 1;
+        }
+        Ok(failed)
+    }
+
     pub async fn resume_run(
         self: &Arc<Self>,
         dto: AgentResumeRunDto,

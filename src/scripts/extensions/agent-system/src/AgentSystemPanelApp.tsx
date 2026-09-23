@@ -28,18 +28,42 @@ import {
     ProfileSkillsSection,
     ProfileWorkspaceSection,
 } from './ProfileResourcesOutputSections';
+import { ProfileStateAccessSection } from './ProfileStateAccessSection';
+import { ProfileRecallSection } from './ProfileRecallSection';
+import { ProfileWorldInfoSection } from './ProfileWorldInfoSection';
 import { RunHistoryPanel } from './RunHistoryPanel';
+import type { StateConfigController } from './state-config-controller';
+import { StateConfigPanel } from './StateConfigPanel';
+import type { MachineConfigController } from './state-machine-controller';
+import { StateMachinePanel } from './StateMachinePanel';
+import type { PredicateConfigController } from './state-predicate-controller';
+import { StatePredicatePanel } from './StatePredicatePanel';
 
 export type AgentSystemPanelAppProps = {
     controller: AgentSystemPanelController;
     runHistory: RunHistoryController;
     runRetention: RunRetentionController;
+    stateConfig: StateConfigController;
+    machineConfig: MachineConfigController;
+    predicateConfig: PredicateConfigController;
     tr: Tr;
     onRequestClose: () => void;
 };
 
-export function AgentSystemPanelApp({ controller, runHistory, runRetention, tr, onRequestClose }: AgentSystemPanelAppProps) {
+export function AgentSystemPanelApp({
+    controller,
+    runHistory,
+    runRetention,
+    stateConfig,
+    machineConfig,
+    predicateConfig,
+    tr,
+    onRequestClose,
+}: AgentSystemPanelAppProps) {
     const snapshot = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
+    const stateConfigSnapshot = useSyncExternalStore(stateConfig.subscribe, stateConfig.getSnapshot);
+    const machineConfigSnapshot = useSyncExternalStore(machineConfig.subscribe, machineConfig.getSnapshot);
+    const predicateConfigSnapshot = useSyncExternalStore(predicateConfig.subscribe, predicateConfig.getSnapshot);
     const { draft, settings, profiles } = snapshot;
     const activeProfileId = activeProfileIdOf(settings);
     const runnableProfiles = activeProfileOptions(profiles);
@@ -106,7 +130,7 @@ export function AgentSystemPanelApp({ controller, runHistory, runRetention, tr, 
                     </nav>
 
                     {settings.activeTab === 'profiles' ? (
-                        <section key="profiles" className="ttas-panel">
+                        <section key="profiles" className="ttas-panel ttas-tab-panel">
                             <div className="ttas-profile-layout">
                                 <aside className="ttas-list ttas-side-list">
                                     <div className="ttas-list-header">
@@ -265,6 +289,9 @@ export function AgentSystemPanelApp({ controller, runHistory, runRetention, tr, 
                                     <ProfileToolsSection snapshot={snapshot} controller={controller} tr={tr} />
                                     <ProfileSkillsSection snapshot={snapshot} controller={controller} tr={tr} />
                                     <ProfileWorkspaceSection snapshot={snapshot} controller={controller} tr={tr} />
+                                    <ProfileStateAccessSection snapshot={snapshot} controller={controller} tr={tr} />
+                                    <ProfileRecallSection snapshot={snapshot} controller={controller} tr={tr} />
+                                    <ProfileWorldInfoSection snapshot={snapshot} controller={controller} tr={tr} />
                                     {snapshot.profileEditMode === 'main' && (
                                         <ProfileOutputSection snapshot={snapshot} controller={controller} tr={tr} />
                                     )}
@@ -273,8 +300,32 @@ export function AgentSystemPanelApp({ controller, runHistory, runRetention, tr, 
                             </div>
                         </section>
                     ) : settings.activeTab === 'runs' ? (
-                        <section key="runs" className="ttas-panel">
+                        <section key="runs" className="ttas-panel ttas-tab-panel">
                             <RunHistoryPanel controller={runHistory} retention={runRetention} tr={tr} />
+                        </section>
+                    ) : settings.activeTab === 'state' ? (
+                        <section key="state" className="ttas-panel ttas-tab-panel">
+                            <StateConfigPanel
+                                snapshot={stateConfigSnapshot}
+                                controller={stateConfig}
+                                tr={tr}
+                            />
+                        </section>
+                    ) : settings.activeTab === 'machines' ? (
+                        <section key="machines" className="ttas-panel ttas-tab-panel">
+                            <StateMachinePanel
+                                snapshot={machineConfigSnapshot}
+                                controller={machineConfig}
+                                tr={tr}
+                            />
+                        </section>
+                    ) : settings.activeTab === 'predicates' ? (
+                        <section key="predicates" className="ttas-panel ttas-tab-panel">
+                            <StatePredicatePanel
+                                snapshot={predicateConfigSnapshot}
+                                controller={predicateConfig}
+                                tr={tr}
+                            />
                         </section>
                     ) : null}
                 </div>

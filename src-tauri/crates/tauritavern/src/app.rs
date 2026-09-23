@@ -79,6 +79,24 @@ pub fn spawn_initialization(
                     sync_automation_service.run(sync_automation_cancel).await;
                 });
 
+                // Runs interrupted by a previous process have no checkpoint and
+                // no way back, so they are closed out before retention looks at
+                // the run list.
+                match state
+                    .services
+                    .agent_runtime_service
+                    .fail_runs_left_by_a_previous_process()
+                    .await
+                {
+                    Ok(0) => {}
+                    Ok(count) => tracing::info!(
+                        "Closed out {count} agent run(s) left by a previous process"
+                    ),
+                    Err(error) => tracing::error!(
+                        "Failed to close out agent runs left by a previous process: {error}"
+                    ),
+                }
+
                 let agent_run_retention_automation_service = state
                     .services
                     .agent_run_retention_automation_service

@@ -98,11 +98,17 @@ pub(super) fn serve_user_data_asset(
         if webview_reapplies_background_video_range && range.start() != 0 {
             return match opened.read(None) {
                 Ok(bytes) => {
+                    // The WebView re-applies the requested range to whatever body it is
+                    // handed, so it needs the whole file. Content-Length has to describe
+                    // the body that is actually sent: declaring the shorter range length
+                    // leaves the remaining bytes unread on the connection, which corrupts
+                    // framing for anything that follows.
+                    let body_length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
                     let response = response::partial(
                         &metadata,
                         bytes,
                         format!("bytes {}-{}/{}", range.start(), range.end(), total_size),
-                        range.byte_len(),
+                        body_length,
                     );
                     tracing::debug!(
                         "User data asset Android video range workaround hit: {}",
@@ -266,7 +272,8 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
         assert_eq!(response.body(), b"abcd");
-        assert_eq!(response.headers()[CONTENT_LENGTH], "2");
+        // The declared length must match the body that is sent, not the requested range.
+        assert_eq!(response.headers()[CONTENT_LENGTH], "4");
     }
 
     #[test]

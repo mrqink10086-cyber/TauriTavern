@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use tt_adapter_quickjs::QuickJsScriptEngine;
+use tt_adapter_vector::RedbVectorRepository;
 use tt_adapter_storage_core::chat_directory_identity::new_shared_chat_alias_store_for_user_dir;
 use tt_adapter_storage_core::{FileChatRepository, FileSettingsRepository};
 use tt_adapter_storage_core::{FileLlmConnectionRepository, FileMcpServerRepository};
@@ -54,6 +55,7 @@ use tt_application::services::chat_history_coordinator::ChatHistoryCoordinator;
 use tt_application::services::llm_connection_service::LlmConnectionService;
 use tt_application::services::mcp_service::McpService;
 use tt_application::services::prompt_assembly_service::PromptAssemblyService;
+use tt_application::services::recall_service::RecallService;
 use tt_application::services::skill_service::SkillService;
 use tt_domain::errors::DomainError;
 use tt_domain::models::agent::profile::{
@@ -73,6 +75,7 @@ use tt_ports::mcp::{
     McpCallIssue, McpCallOutcome, McpDiscoveredTool, McpDiscoveryResult, McpGateway,
     McpKnownResponse, McpTextContent, McpToolCallResult,
 };
+use tt_ports::repositories::vector_repository::{LocalEmbeddingRepository, LocalEmbeddingRequest};
 use tt_ports::repositories::agent_invocation_repository::AgentInvocationRepository;
 use tt_ports::repositories::agent_profile_repository::AgentProfileRepository;
 use tt_ports::repositories::agent_profile_storage_health_repository::AgentProfileStorageHealthRepository;
@@ -172,6 +175,24 @@ async fn character_service_with_world_repository(
     )
 }
 
+/// A stand-in for the local embedding model in contract fixtures.
+///
+/// The real one downloads weights and needs Candle. What the run lifecycle
+/// cares about is only that recall gets a finite, non-empty, unit-length
+/// vector, so the fixture returns exactly that.
+struct ContractEmbeddingRepository;
+
+#[async_trait]
+impl LocalEmbeddingRepository for ContractEmbeddingRepository {
+    async fn embed(&self, request: LocalEmbeddingRequest) -> Result<Vec<Vec<f32>>, DomainError> {
+        Ok(request
+            .texts
+            .iter()
+            .map(|_| vec![1.0_f32, 0.0_f32])
+            .collect())
+    }
+}
+
 fn agent_runtime_fixture(root: &Path) -> AgentRuntimeFixture {
     agent_runtime_fixture_with_responses(root, default_agent_responses())
 }
@@ -231,6 +252,14 @@ fn agent_runtime_fixture_with_results(
         Arc::new(FileMcpServerRepository::new(root.join("_tauritavern/mcp"))),
         mcp_gateway.clone(),
     ));
+    let redb_vector_repository = Arc::new(RedbVectorRepository::new(
+        root.join("vectors").join("tauritavern-v1.redb"),
+    ));
+    let recall_service = Arc::new(RecallService::new(
+        redb_vector_repository.clone(),
+        redb_vector_repository,
+        Arc::new(ContractEmbeddingRepository),
+    ));
     let service = Arc::new(AgentRuntimeService::new(
         agent_repository.clone() as Arc<dyn AgentRunRepository>,
         agent_repository.clone() as Arc<dyn AgentInvocationRepository>,
@@ -244,6 +273,7 @@ fn agent_runtime_fixture_with_results(
         prompt_assembly_service,
         mcp_service.clone(),
         Arc::new(QuickJsScriptEngine::new()),
+        recall_service,
     ));
 
     AgentRuntimeFixture {
@@ -326,6 +356,7 @@ async fn start_contract_agent_run(
             ..Default::default()
         },
         None,
+        None,
     )
     .await
 }
@@ -336,6 +367,7 @@ async fn start_contract_agent_run_with_options(
     label: &str,
     options: AgentStartRunOptionsDto,
     frozen_run_input_snapshot: Option<Value>,
+    run_input: Option<Value>,
 ) -> AgentRunHandleDto {
     let request = chat_request(label);
     let file_name = format!("{label}.jsonl");
@@ -346,6 +378,17 @@ async fn start_contract_agent_run_with_options(
         .save(&chat)
         .await
         .expect("save empty contract chat");
+    let mut snapshot = json!({
+        "contextPolicy": &profile.context,
+        "chatCompletionPayload": request.payload,
+    });
+    // The front end is what fills in the chat's bound state normally, so a test
+    // that needs one hands it in here instead of going through the assembly.
+    if let Some(extra) = run_input.as_ref().and_then(Value::as_object) {
+        for (key, value) in extra {
+            snapshot[key] = value.clone();
+        }
+    }
     fixture
         .service
         .start_run(AgentStartRunDto {
@@ -357,10 +400,7 @@ async fn start_contract_agent_run_with_options(
             generation_type: "normal".to_string(),
             profile_id: Some(profile.id.as_str().to_string()),
             persist_base_state_id: None,
-            prompt_snapshot: Some(json!({
-                "contextPolicy": &profile.context,
-                "chatCompletionPayload": request.payload,
-            })),
+            prompt_snapshot: Some(snapshot),
             frozen_run_input_snapshot,
             generation_intent: None,
             skill_scope_refs: AgentSkillScopeRefsDto::default(),

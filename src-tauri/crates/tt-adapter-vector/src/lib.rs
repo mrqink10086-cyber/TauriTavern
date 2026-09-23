@@ -1,4 +1,5 @@
 mod candle_local_embedding_repository;
+mod redb_recall_repository;
 mod redb_vector_repository;
 
 pub use candle_local_embedding_repository::CandleLocalEmbeddingRepository;

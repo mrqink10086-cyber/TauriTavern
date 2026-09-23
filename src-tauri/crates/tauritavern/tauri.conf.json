@@ -95,6 +95,15 @@
         }
       }
     },
+    "windows": {
+      "nsis": {
+        "installMode": "both",
+        "languages": [
+          "English",
+          "SimpChinese"
+        ]
+      }
+    },
     "macOS": {
       "infoPlist": "Info.macos.plist"
     },

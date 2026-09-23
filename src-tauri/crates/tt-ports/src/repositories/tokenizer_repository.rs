@@ -23,6 +23,20 @@ pub fn openai_content_token_limit(text_token_limit: usize, message_wrapper_token
 pub trait TokenizerRepository: Send + Sync {
     async fn ensure_model_ready(&self, model: &str) -> Result<(), DomainError>;
 
+    /// Whether this vocabulary can be made ready without fetching anything.
+    ///
+    /// A writer may wait for something that is already here — a vocabulary
+    /// compiled into the app, a file the user named, or an encoding the parser
+    /// carries — and may not start a download in the middle of one: the write
+    /// would hang on the network, and a failure would be a state edit that
+    /// silently did not happen. Callers use this to refuse the name instead.
+    ///
+    /// The default answers no, because a repository that cannot promise it is a
+    /// repository whose names may all be remote.
+    async fn can_count_offline(&self, _model: &str) -> bool {
+        false
+    }
+
     fn encode(&self, model: &str, text: &str) -> Result<Vec<u32>, DomainError>;
 
     fn decode(&self, model: &str, token_ids: &[u32]) -> Result<String, DomainError>;

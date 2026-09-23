@@ -21,8 +21,8 @@ use tt_domain::models::agent::{
 };
 use tt_domain::models::tool::{ToolArguments, ToolId, ToolInvocation};
 use tt_ports::repositories::workspace_repository::{
-    WorkspaceAppendResult, WorkspaceEntry, WorkspaceFile, WorkspaceFileList, WorkspaceRepository,
-    WorkspaceWriteGuard,
+    PersistentFileWrite, WorkspaceAppendResult, WorkspaceEntry, WorkspaceFile, WorkspaceFileList,
+    WorkspaceRepository, WorkspaceWriteGuard,
 };
 
 fn test_policy() -> WorkspaceAccessPolicy {
@@ -404,6 +404,15 @@ impl WorkspaceRepository for TestWorkspaceRepository {
         unreachable!("tool tests do not start runs")
     }
 
+    async fn read_persistent_state_file(
+        &self,
+        _workspace_id: &str,
+        _state_id: &str,
+        _path: &WorkspacePath,
+    ) -> Result<WorkspaceFile, DomainError> {
+        unreachable!("tool tests read only the run workspace")
+    }
+
     async fn initialize_run(
         &self,
         _run: &AgentRun,
@@ -506,6 +515,15 @@ impl WorkspaceRepository for TestWorkspaceRepository {
             entries: Vec::<WorkspaceEntry>::new(),
             truncated: false,
         })
+    }
+
+    async fn publish_persistent_files(
+        &self,
+        _workspace_id: &str,
+        _base_state_id: Option<&str>,
+        _files: &[PersistentFileWrite],
+    ) -> Result<WorkspacePersistentChangeSet, DomainError> {
+        unreachable!("tool tests do not publish persistent versions")
     }
 
     async fn commit_persistent_changes(

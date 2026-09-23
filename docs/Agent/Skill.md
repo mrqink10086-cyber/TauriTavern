@@ -81,12 +81,34 @@ export default function ({ path }) {
 | `context.worldInfo.entries` | Run 启动时激活的世界书 |
 | `context.variables.local` / `global` | 保留原始 JSON 类型的 SillyTavern 变量 |
 | `context.macro` | 冻结的名称、角色、聊天位置等宏数据 |
+| `context.state` | 聊天当前状态：字段键到值数组，与面板、状态机钩子看到的是同一份 |
 | `macros.render(text)` | 使用冻结值展开模板中的宏 |
 | `log.info(text)` / `warn` / `error` / `debug` | 将字符串写入宿主日志 |
 
 路径相对于 Run 工作区，读写范围来自 Invocation 的 Profile。脚本在调用时的文件快照上工作，同一路径多次写入保留最后的内容；执行成功后按快照 SHA 写回。并发修改会报告冲突，多文件写入中途失败时会列出已写入的文件。
 
 `context` 是当前执行的副本，修改它不会写回宿主。`macros.render()` 只展开一层，未知语法保持原文，`\{{char}}` 得到字面量 `{{char}}`；支持的宏与查询见 [frozen_macros](../../src-tauri/crates/tt-domain/src/frozen_macros.rs)。
+
+### 读写状态
+
+`context.state` 是字段键到值数组的映射，与状态面板、状态机钩子看到的是同一份数据：
+
+```js
+const date = context.state['环境/日期']?.[0] ?? '（未知）';
+```
+
+要改状态，把改动作为 `stateWrites` 返回，而不是写文件：
+
+```js
+return {
+  summary: '……',
+  stateWrites: [{ key: '环境/天气', values: ['晴'] }],
+};
+```
+
+这些写入经过声明校验与逐字段的可写授权，与模型直接调用 `state.update` 完全一样：只认声明过的键，只改被允许改的字段。被拒时**脚本调用不会失败**——原因附在工具结果里，模型据此可以改一次再试。
+
+`state/` 目录不经 `workspace` 可达：`state/document.json` 既读不到也写不进。这一点是有意的，经文件写入会绕过声明与授权；试图写时会收到一条提示，指出应改用 `stateWrites`。
 
 ### 模块与工具箱
 

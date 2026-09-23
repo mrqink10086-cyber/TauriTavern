@@ -288,6 +288,21 @@ export function ProfileRunSection({ snapshot, controller, tr }: ProfileSectionPr
                     </small>
                 </label>
                 <label className="ttas-field">
+                    <span>{tr('unfoldedToolTurns')}</span>
+                    <input
+                        className="text_pole"
+                        type="number"
+                        min="1"
+                        value={draft.tools.unfoldedToolTurns}
+                        disabled={builtin}
+                        onChange={(event) => controller.setToolsLimitField('unfoldedToolTurns', parseNumberInput(event.target.value))}
+                    />
+                    <small className="ttas-field-hint">
+                        <i className="fa-solid fa-circle-info" aria-hidden="true"></i>
+                        <span>{tr('unfoldedToolTurnsHint')}</span>
+                    </small>
+                </label>
+                <label className="ttas-field">
                     <span>{tr('modelRetries')}</span>
                     <input
                         className="text_pole"

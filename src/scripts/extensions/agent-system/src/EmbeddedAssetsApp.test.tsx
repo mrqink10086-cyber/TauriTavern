@@ -8,6 +8,7 @@ import {
     type EmbeddedAssetsInitial,
     type EmbeddedAssetsRead,
     type EmbeddedSkillItem,
+    type EmbeddedStateItem,
     buildSkillOptions,
 } from './EmbeddedAssetsContract';
 
@@ -61,8 +62,14 @@ function emptyInitial(): EmbeddedAssetsInitial {
         targetInfo: { kind: 'preset', name: 'Preset A', subtitle: 'Chat Completion' },
         profiles: [],
         skills: [],
+        states: [],
+        machines: [],
+        predicates: [],
         embeddedProfiles: [],
         embeddedSkills: [],
+        embeddedStates: [],
+        embeddedMachines: [],
+        embeddedPredicates: [],
     };
 }
 
@@ -71,6 +78,10 @@ function createWorld(options: {
     skills?: TauriTavernSkillIndexEntry[];
     embeddedProfiles?: EmbeddedAssetsRead['profiles'];
     embeddedSkills?: EmbeddedAssetsRead['skills'];
+    machines?: string[];
+    predicates?: string[];
+    embeddedMachines?: EmbeddedAssetsRead['machines'];
+    embeddedPredicates?: EmbeddedAssetsRead['predicates'];
     failLoad?: boolean;
 } = {}) {
     const world = {
@@ -78,11 +89,18 @@ function createWorld(options: {
             target: { kind: 'preset' as const, name: 'Preset A', subtitle: 'Chat Completion' },
             profiles: options.embeddedProfiles ?? [],
             skills: options.embeddedSkills ?? [],
+            states: [] as EmbeddedStateItem[],
+            machines: options.embeddedMachines ?? [],
+            predicates: options.embeddedPredicates ?? [],
         },
         embeddedProfileIds: [] as string[],
         embeddedSkillNames: [] as string[],
+        embeddedMachineNames: [] as string[],
+        embeddedPredicateNames: [] as string[],
         removedProfileIds: [] as string[],
         removedSkillNames: [] as string[],
+        removedMachineNames: [] as string[],
+        removedPredicateNames: [] as string[],
         toasts: [] as string[],
         errors: [] as string[],
     };
@@ -96,8 +114,14 @@ function createWorld(options: {
             skillEntry('lore-helper', { kind: 'global' }),
             skillEntry('beta-tool', { kind: 'character', characterId: 'char-1' }),
         ]),
+        states: [],
+        machines: options.machines ?? [],
+        predicates: options.predicates ?? [],
         embeddedProfiles: world.embedded.profiles,
         embeddedSkills: world.embedded.skills,
+        embeddedStates: world.embedded.states,
+        embeddedMachines: world.embedded.machines,
+        embeddedPredicates: world.embedded.predicates,
     };
     const actions: EmbeddedAssetsActions = {
         embedProfile: (profileId) => {
@@ -116,6 +140,23 @@ function createWorld(options: {
             ];
             return Promise.resolve();
         },
+        embedState: () => Promise.resolve('scene'),
+        embedMachine: (machineName) => {
+            world.embeddedMachineNames.push(machineName);
+            world.embedded.machines = [
+                ...world.embedded.machines.filter((item) => item.name !== machineName),
+                { name: machineName, stateCount: 2, transitionCount: 1, hasHooks: false },
+            ];
+            return Promise.resolve(machineName);
+        },
+        embedPredicateSet: (setName) => {
+            world.embeddedPredicateNames.push(setName);
+            world.embedded.predicates = [
+                ...world.embedded.predicates.filter((item) => item.name !== setName),
+                { name: setName, groupCount: 1, entryCount: 3 },
+            ];
+            return Promise.resolve(setName);
+        },
         removeProfile: (profileId) => {
             world.removedProfileIds.push(profileId);
             world.embedded.profiles = world.embedded.profiles.filter((item) => item.profile.id !== profileId);
@@ -126,10 +167,24 @@ function createWorld(options: {
             world.embedded.skills = world.embedded.skills.filter((item) => item.skillName !== skillName);
             return Promise.resolve();
         },
+        removeState: () => Promise.resolve(),
+        removeMachine: (machineName) => {
+            world.removedMachineNames.push(machineName);
+            world.embedded.machines = world.embedded.machines.filter((item) => item.name !== machineName);
+            return Promise.resolve();
+        },
+        removePredicateSet: (setName) => {
+            world.removedPredicateNames.push(setName);
+            world.embedded.predicates = world.embedded.predicates.filter((item) => item.name !== setName);
+            return Promise.resolve();
+        },
         readEmbedded: () => ({
             target: world.embedded.target,
             profiles: world.embedded.profiles,
             skills: world.embedded.skills,
+            states: world.embedded.states,
+            machines: world.embedded.machines,
+            predicates: world.embedded.predicates,
         }),
         toastSuccess: (message) => {
             world.toasts.push(message);
@@ -213,6 +268,40 @@ test('embeds the auto-selected skill and removes embedded items', async () => {
     }
     await user.click(firstRemoveButton);
     await waitFor(() => expect(world.removedSkillNames).toEqual(['lore-helper']));
+    expect(screen.getAllByRole('button', { name: 'removeEmbeddedAsset' })).toHaveLength(1);
+});
+
+test('carries a state machine and a conditional set, then takes them back off', async () => {
+    const { actions, initialLoad, world } = createWorld({
+        machines: ['flow-two', 'flow-one'],
+        predicates: ['tones'],
+        embeddedPredicates: [{ name: 'tones', groupCount: 2, entryCount: 5 }],
+    });
+    const user = userEvent.setup();
+    render(<EmbeddedAssetsApp initialLoad={initialLoad} actions={actions} tr={tr} onRequestClose={() => undefined} />);
+    await waitFor(() => expect(screen.getAllByText('Preset A').length).toBeGreaterThan(0));
+
+    // The lists arrive in store order, and the first entry is what is selected.
+    const machineSelect = screen.getByRole<HTMLSelectElement>('combobox', { name: 'selectMachine' });
+    expect(machineSelect.value).toBe('flow-two');
+    await user.click(screen.getByRole('button', { name: /embedMachine/ }));
+    await waitFor(() => expect(world.embeddedMachineNames).toEqual(['flow-two']));
+    expect(world.toasts).toContain('embeddedMachine name=flow-two');
+    expect(screen.getAllByText('flow-two').length).toBeGreaterThanOrEqual(2);
+
+    // The carried rows report what is in them, not just their names. (Subtitles
+    // run through the real translator, not this test's `tr` stub.)
+    expect(screen.getByText(/2 stages/)).toBeDefined();
+    expect(screen.getByText(/2 groups/)).toBeDefined();
+
+    const removeButtons = screen.getAllByRole('button', { name: 'removeEmbeddedAsset' });
+    expect(removeButtons).toHaveLength(2);
+    const [firstRemoveButton] = removeButtons;
+    if (!firstRemoveButton) {
+        throw new Error('expected the first embedded remove button');
+    }
+    await user.click(firstRemoveButton);
+    await waitFor(() => expect(world.removedMachineNames).toEqual(['flow-two']));
     expect(screen.getAllByRole('button', { name: 'removeEmbeddedAsset' })).toHaveLength(1);
 });
 

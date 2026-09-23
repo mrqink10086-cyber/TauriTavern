@@ -458,6 +458,25 @@ type TauriTavernAgentProfileDefinition = {
         // positive means a recent-message window.
         initialChatHistoryMessages: number;
         includeActivatedWorldInfo: boolean;
+        /**
+         * Per-entry exceptions to that switch, in both directions: an entry is
+         * named by its book and uid, and a rule with `inject: false` keeps it out
+         * while the switch says entries are injected.
+         *
+         * Empty (the default) means the switch answers for everything.
+         */
+        worldInfo?: {
+            entries?: ReadonlyArray<{
+                book: string;
+                uid: number;
+                inject: boolean;
+            }>;
+            /**
+             * Whether a delegated invocation carries the run's activated entries.
+             * Off by default: a SubAgent starts from a prompt of its own.
+             */
+            subagentInherits?: boolean;
+        };
     };
     delegation: {
         canDelegate: boolean;
@@ -483,6 +502,7 @@ type TauriTavernAgentProfileDefinition = {
         maxRounds: number;
         maxCallsPerRun: number;
         mcpResultInlineCharLimit: number;
+        unfoldedToolTurns: number;
         maxCallsPerTool?: Record<string, number>;
     };
     skills: {
@@ -494,6 +514,45 @@ type TauriTavernAgentProfileDefinition = {
     workspace: {
         visibleRoots: string[];
         writableRoots: string[];
+    };
+    /**
+     * Per-field access to the chat's state. An empty/absent policy means "not
+     * configured yet" and constrains nothing; once entries exist, a field no
+     * entry covers gets none of the three switches.
+     */
+    stateAccess?: {
+        entries?: Array<{
+            pattern: string;
+            inject?: boolean;
+            visible?: boolean;
+            writable?: boolean;
+            /** Where an injected value lands. Defaults to 'atDepth'. */
+            injectSlot?: 'before' | 'after' | 'atDepth';
+            /** Messages from the end of the chat, for the 'atDepth' slot. Defaults to 4. */
+            injectDepth?: number;
+        }>;
+    };
+    /**
+     * What this Agent does with the recall its chat's extensions produced.
+     *
+     * The blocks are written before a run starts and frozen with the rest of its
+     * input; nothing here retrieves.
+     */
+    recall?: {
+        /** Whether this Agent's own prompt carries the blocks. Defaults to true. */
+        inject?: boolean;
+        /**
+         * Which extension prompts count as recall. A trailing `*` is a prefix.
+         * Defaults to ['3_vectfox*']; an empty list means this Agent claims no
+         * recall block at all.
+         */
+        sources?: string[];
+        /**
+         * What a delegated invocation does with the parent's blocks. Defaults to
+         * 'skip': a sub-agent starts from a prompt of its own, and carrying the
+         * parent's recollection into it is a choice, not the standing behavior.
+         */
+        subagent?: 'skip' | 'inherit';
     };
     plan: {
         mode: 'none' | 'free' | 'strict' | 'hybrid';
@@ -1352,6 +1411,8 @@ type TauriTavernWorldInfoActivationEntry = {
     displayName: string;
     constant: boolean;
     position?: TauriTavernWorldInfoActivationPosition;
+    /** The opening of the entry, for a list that has to show what it is. */
+    contentPreview?: string;
 };
 
 type TauriTavernWorldInfoActivationBatch = {

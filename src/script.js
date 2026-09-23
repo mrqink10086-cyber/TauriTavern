@@ -70,8 +70,27 @@ import {
     subscribeAgentRunState,
 } from './scripts/tauritavern/agent/agent-run-controller.js';
 import { agentErrorMessage } from './scripts/tauritavern/agent/agent-error-presenter.js';
-import { normalizeAgentContextPolicy } from './scripts/tauritavern/agent/agent-context-policy.js';
+import { normalizeAgentContextPolicy, worldInfoEntryFilter, worldInfoScanNeeded } from './scripts/tauritavern/agent/agent-context-policy.js';
 import { normalizeAgentSystemPrompt } from './scripts/tauritavern/agent/agent-system-prompt.js';
+import {
+    applyStateInjectionBlocks,
+    flushStateInjectionPrompts,
+    loadStateInjectionBlocks,
+} from './scripts/tauritavern/agent/state-injection-prompts.js';
+import {
+    applyStatePredicateEntries,
+    flushStatePredicatePrompts,
+    loadStatePredicateEntries,
+} from './scripts/tauritavern/agent/state-predicate-entries.js';
+import { resolveStableChatId } from './tauri/main/api/agent-chat-identity.js';
+import { bindEditedStateToFloor } from './tauri/main/api/agent-chat-message.js';
+import {
+    resolveCurrentStateDeclaration,
+    resolveCurrentStateMachine,
+} from './tauri/main/api/agent-prompt-snapshot.js';
+import { loadStatePanel, updateStateProse, updateStateValues } from './tauri/main/api/state-panel.js';
+import { DEFAULT_RECALL_SOURCES, waitForRecallBlocks } from './scripts/tauritavern/agent/recall-gate.js';
+import { createStatePanel } from './scripts/tauritavern/state/state-panel-ui.js';
 import { readLegacyToolInvocations, stripOldToolTurns } from './scripts/tauritavern/tool-turn-projection.js';
 import {
     buildFrozenRunInputSnapshot,
@@ -329,7 +348,7 @@ import {
     getInstructMacroValues,
 } from './scripts/instruct-mode.js';
 import { initLocales, t, translate } from './scripts/i18n.js';
-import { captureTokenCacheSaveState, getFriendlyTokenizerName, getTokenCount, getTokenCountAsync, initTokenizers, saveTokenCache, warmTokenizerCache } from './scripts/tokenizers.js';
+import { captureTokenCacheSaveState, getFriendlyTokenizerName, getTokenCount, getTokenCountAsync, getTokenizerModel, initTokenizers, saveTokenCache, warmTokenizerCache } from './scripts/tokenizers.js';
 import {
     user_avatar,
     primeUserAvatarsSnapshot,
@@ -5752,11 +5771,17 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
         creatorNotes: creatorNotes,
         trigger: GENERATION_TYPE_TRIGGERS.includes(type) ? type : 'normal',
     };
-    const { worldInfoString, worldInfoBefore, worldInfoAfter, worldInfoExamples, worldInfoDepth, outletEntries, worldInfoActivation } = await getWorldInfoPrompt(chatForWI, this_max_context, dryRun, globalScanData);
+    const worldInfoEntryFilterForRun = agentMode ? worldInfoEntryFilter(resolvedAgentContextPolicy) : null;
+    const { worldInfoString, worldInfoBefore, worldInfoAfter, worldInfoExamples, worldInfoDepth, outletEntries, worldInfoActivation } = await getWorldInfoPrompt(chatForWI, this_max_context, dryRun, globalScanData, worldInfoEntryFilterForRun);
     setExtensionPrompt(inject_ids.QUIET_PROMPT, '', extension_prompt_types.IN_PROMPT, 0, true);
-    const includeActivatedWorldInfo = !agentMode || resolvedAgentContextPolicy.includeActivatedWorldInfo;
-    const promptWorldInfoBefore = includeActivatedWorldInfo ? worldInfoBefore : '';
-    const promptWorldInfoAfter = includeActivatedWorldInfo ? worldInfoAfter : '';
+    // Whether World Info is in play at all. The switch answers for entries with no
+    // rule of their own; a rule that lets one through means there is still
+    // something to inject while the switch says there is not — and the scan has
+    // already dropped everything the policy refuses, so what it returned is used
+    // as it stands.
+    const includeActivatedWorldInfo = !agentMode || worldInfoScanNeeded(resolvedAgentContextPolicy);
+    const promptWorldInfoBefore = worldInfoBefore;
+    const promptWorldInfoAfter = worldInfoAfter;
 
     // Add message example WI
     if (includeActivatedWorldInfo) {
@@ -6414,6 +6439,19 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
             break;
         }
         case 'openai': {
+            // State injection lands here: before the frozen snapshot and before
+            // prompt assembly, so both assembly modes read the same blocks.
+            if (agentMode) {
+                await refreshAgentStateInjections(agentProfileId);
+                // Recall lands here too, and for a harder reason: its block is
+                // written by an extension's interceptor, which the pass above
+                // has already awaited — but only an extension that awaits its
+                // own query is finished by then. Freezing without the block is
+                // silent, so it is checked.
+                await settleRecallBlocks();
+            } else {
+                flushStateInjectionPrompts(extension_prompts);
+            }
             const extensionPromptSnapshot = agentMode
                 ? await snapshotExtensionPromptsForFrozenRun(extension_prompts)
                 : extension_prompts;
@@ -7191,6 +7229,276 @@ async function doChatInject(messages, isContinue) {
     return injectedIndices;
 }
 
+/** The chat's state panel, created on first use and kept for the session. */
+let statePanel = null;
+
+function ensureStatePanel() {
+    if (statePanel) {
+        return statePanel;
+    }
+    // The chat sheet is a positioned container, so the rails can sit beside the
+    // chat without entering its layout.
+    const mount = document.getElementById('sheld') ?? document.body;
+    // The panel draws state; handing it the write path is what lets a person
+    // decide a value there. The write goes through the same host command, the
+    // same declaration check and the same recalculation hook as any other edit.
+    statePanel = createStatePanel({
+        mount,
+        onWriteState: (request) => writeStateValues({ ...request, recalculate: true }),
+        onWriteProse: (request) => writeStateProse(request),
+        // A refresh re-reads the declaration as well as the values, so an edit
+        // to a scene can be seen without waiting for the next turn.
+        onRefresh: () => void refreshStatePanel(),
+    });
+    return statePanel;
+}
+
+/**
+ * Ask the host what this chat's panel shows and draw it.
+ *
+ * Every failure clears the panel rather than leaving the previous answer on
+ * screen: a panel that keeps showing another chat's state is worse than no
+ * panel, because it looks like the truth.
+ */
+async function refreshStatePanel() {
+    const panel = ensureStatePanel();
+    try {
+        const safeInvoke = window.__TAURITAVERN__?.invoke?.safeInvoke;
+        if (typeof safeInvoke !== 'function') {
+            panel.clear();
+            return;
+        }
+        // The host reads the saved payload, so a save that is still pending
+        // would make it answer with the state of the previous swipe or floor.
+        await flushDebouncedChatSave();
+        const chatRef = getActiveChatSnapshot().ref;
+        const stableChatId = await resolveStableChatId(chatRef);
+        const declaration = await resolveCurrentStateDeclaration();
+        if (!declaration) {
+            // No declaration, no panel: the key space and the display names both
+            // come from it, and so does the theme.
+            panel.clear();
+            panel.setTheme('');
+            return;
+        }
+        const result = await loadStatePanel({ chatRef, stableChatId, declaration, safeInvoke });
+        panel.setTheme(result.themeCss);
+        panel.render(result.panels, result.stateUpdated, result.fields);
+    } catch (error) {
+        console.warn('[state-panel] refresh failed; the panel is cleared rather than left stale', error);
+        panel.clear();
+    }
+}
+
+/**
+ * Write state as the person using the interface.
+ *
+ * The model writes state through a tool; a person writes it by deciding a value
+ * in the panel. Both end in a published version bound to a floor, and both pass
+ * the declaration. What differs is the authorization (a click is not a model
+ * acting on its own, so the Profile's per-field write grant is not consulted) and
+ * the recalculation pass: with a machine present its hook runs once more, so the
+ * derived values follow the edit without the engine knowing any formula.
+ *
+ * The new version is bound to the floor it belongs to before the panel is
+ * refreshed: an unbound version would be published and then invisible, which is
+ * exactly the silent failure this path must not have.
+ *
+ * @param {{ fields?: Array<{ key: string; value: string[] }>; remove?: string[]; recalculate?: boolean }} [input]
+ * @returns {Promise<any>}
+ */
+export async function writeStateValues(input = {}) {
+    const safeInvoke = window.__TAURITAVERN__?.invoke?.safeInvoke;
+    if (typeof safeInvoke !== 'function') {
+        throw new Error('state.host_unavailable: the host bridge is not available in this window');
+    }
+
+    await flushDebouncedChatSave();
+    const chatRef = getActiveChatSnapshot().ref;
+    const stableChatId = await resolveStableChatId(chatRef);
+    const declaration = await resolveCurrentStateDeclaration();
+    if (!declaration) {
+        throw new Error('state.no_declaration: this chat has no bound state declaration, so there is no key space to write');
+    }
+    const machine = await resolveCurrentStateMachine(declaration);
+
+    const result = await updateStateValues({
+        chatRef,
+        stableChatId,
+        declaration,
+        machine,
+        // A scene that counts its values in tokens follows this model unless it
+        // names a vocabulary of its own.
+        tokenizerModel: getTokenizerModel(),
+        fields: input.fields,
+        remove: input.remove,
+        recalculate: input.recalculate !== false,
+        safeInvoke,
+    });
+
+    if (result.changed) {
+        bindEditedStateToFloor(chat, {
+            stateId: result.stateId,
+            baseStateId: result.baseStateId,
+            changeCount: result.changeCount,
+        });
+        await saveChat();
+    }
+    await refreshStatePanel();
+    return result;
+}
+
+/**
+ * Write one prose block as the person using the interface.
+ *
+ * Prose is where the text that is not state lives — a diary, an inner voice —
+ * so this path carries none of the state machinery: no keys, no access
+ * switches, no value limit, no recalculation. What it keeps is the version and
+ * the binding, for the same reason the state write keeps them: an unbound
+ * version would be published and then invisible, and the reader would keep
+ * seeing the previous floor's text.
+ *
+ * Nothing here decides whether the model reads it. Prose is never injected; a
+ * Profile that can see `persist` can read the file, and a prompt is what asks
+ * it to.
+ *
+ * @param {{ path?: string; text?: string }} [input]
+ * @returns {Promise<any>}
+ */
+export async function writeStateProse(input = {}) {
+    const safeInvoke = window.__TAURITAVERN__?.invoke?.safeInvoke;
+    if (typeof safeInvoke !== 'function') {
+        throw new Error('state.host_unavailable: the host bridge is not available in this window');
+    }
+
+    const path = String(input.path ?? '').trim();
+    if (!path) {
+        throw new Error('state.undeclared_prose: no prose file was named by the request');
+    }
+
+    await flushDebouncedChatSave();
+    const chatRef = getActiveChatSnapshot().ref;
+    const stableChatId = await resolveStableChatId(chatRef);
+    const declaration = await resolveCurrentStateDeclaration();
+    if (!declaration) {
+        throw new Error('state.no_declaration: this chat has no bound state declaration, so there is no prose block to write');
+    }
+
+    const result = await updateStateProse({
+        chatRef,
+        stableChatId,
+        declaration,
+        path,
+        text: String(input.text ?? ''),
+        safeInvoke,
+    });
+
+    if (result.changed) {
+        bindEditedStateToFloor(chat, {
+            stateId: result.stateId,
+            baseStateId: result.baseStateId,
+            changeCount: 1,
+        });
+        await saveChat();
+    }
+    await refreshStatePanel();
+    return result;
+}
+
+function initializeStatePanel() {
+    ensureStatePanel().clear();
+
+    const refresh = () => {
+        void refreshStatePanel();
+    };
+
+    // State is bound to the message, and the message mirrors whichever swipe is
+    // selected, so the panel changes with those too — not only with a new chat.
+    for (const eventType of [
+        event_types.CHAT_CHANGED,
+        event_types.GENERATION_ENDED,
+        event_types.MESSAGE_SWIPED,
+        event_types.MESSAGE_SWIPE_DELETED,
+        event_types.MESSAGE_DELETED,
+    ]) {
+        eventSource.on(eventType, refresh);
+    }
+
+    // A binding written between events — by an import, or by the editor's own
+    // bind buttons — would otherwise stay invisible until the next chat change.
+    window.addEventListener('tauritavern:state-binding-changed', refresh);
+}
+
+/**
+ * Wait for the recall blocks this turn is supposed to carry.
+ *
+ * The interceptor pass has already run and been awaited, so this is the check
+ * for an extension that queries in the background: its hook resolves before its
+ * block exists, and the freeze that follows would capture an empty block or the
+ * previous turn's. Reported rather than thrown — a turn is not held hostage by
+ * an extension, but it is also not frozen silently without one.
+ */
+async function settleRecallBlocks(sources = DEFAULT_RECALL_SOURCES) {
+    const outcome = await waitForRecallBlocks(sources, { read: () => extension_prompts });
+    if (!outcome.ready) {
+        console.warn('[recall-gate] recall block missing at freeze time', outcome);
+    }
+    return outcome;
+}
+
+/**
+ * Place the state slice the running Agent Profile may see.
+ *
+ * Injection is an addition to the prompt, not a precondition for generating:
+ * when the host cannot answer, the run continues without state and says so in
+ * the console. What it must never do is leave a stale slice behind, so every
+ * failure path flushes first.
+ */
+async function refreshAgentStateInjections(profileId) {
+    flushStateInjectionPrompts(extension_prompts);
+
+    const safeInvoke = window.__TAURITAVERN__?.invoke?.safeInvoke;
+    if (typeof safeInvoke !== 'function') {
+        console.warn('[state-injection] host safeInvoke is unavailable; this generation runs without state');
+        return 0;
+    }
+
+    let chatRef = null;
+    try {
+        chatRef = getActiveChatSnapshot().ref;
+    } catch (error) {
+        console.warn('[state-injection] active chat is unavailable; this generation runs without state', error);
+        return 0;
+    }
+
+    try {
+        const stableChatId = await resolveStableChatId(chatRef);
+        // The declaration decides injection where the Profile is silent, and it
+        // may carry the predicate set, so it is resolved before either block
+        // kind. A chat without one falls back to the Profile's own policy.
+        const declaration = await resolveCurrentStateDeclaration();
+        const blocks = await loadStateInjectionBlocks({ profileId, chatRef, stableChatId, declaration, safeInvoke });
+        const placed = applyStateInjectionBlocks(blocks, { extensionPrompts: extension_prompts, setExtensionPrompt });
+
+        // Predicate entries are a second block kind with a binding of its own.
+        // Their failure must not take the state slice down, so they are flushed
+        // alone and the state slice's return value is untouched.
+        try {
+            const entries = await loadStatePredicateEntries({ chatRef, stableChatId, declaration, safeInvoke });
+            applyStatePredicateEntries(entries, { extensionPrompts: extension_prompts, setExtensionPrompt });
+        } catch (error) {
+            console.warn('[state-predicates] resolving predicate entries failed; this generation runs without them', error);
+            flushStatePredicatePrompts(extension_prompts);
+        }
+
+        return placed;
+    } catch (error) {
+        console.warn('[state-injection] resolving state injection failed; this generation runs without state', error);
+        flushStateInjectionPrompts(extension_prompts);
+        return 0;
+    }
+}
+
 function flushWIInjections() {
     const depthPrefix = inject_ids.CUSTOM_WI_DEPTH;
     const outletPrefix = inject_ids.CUSTOM_WI_OUTLET('');
@@ -7217,6 +7525,8 @@ function unblockGeneration(type) {
     setGenerationProgress(0);
     flushEphemeralStoppingStrings();
     flushWIInjections();
+    flushStateInjectionPrompts(extension_prompts);
+    flushStatePredicatePrompts(extension_prompts);
 }
 
 export function getNextMessageId(type) {
@@ -13345,6 +13655,7 @@ jQuery(async function () {
     $(document).on('click', '.api_loading', () => cancelStatusCheck('Canceled because connecting was manually canceled'));
 
     installChatInputFocusKeeper();
+    initializeStatePanel();
     $('#send_textarea').on('input', syncAgentGuidanceComposerState);
     subscribeAgentRunState(syncAgentGuidanceComposerState);
     syncAgentGuidanceComposerState();

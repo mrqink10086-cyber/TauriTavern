@@ -32,12 +32,16 @@ use tt_application::services::preset_service::PresetService;
 use tt_application::services::prompt_assembly_service::PromptAssemblyService;
 use tt_application::services::provider_metadata_service::ProviderMetadataService;
 use tt_application::services::quick_reply_service::QuickReplyService;
+use tt_application::services::recall_service::RecallService;
 use tt_application::services::searxng_search_service::SearxngSearchService;
 use tt_application::services::secret_service::SecretService;
 use tt_application::services::settings_service::SettingsService;
 use tt_application::services::skill_service::SkillService;
 use tt_application::services::sprite_service::SpriteService;
 use tt_application::services::stable_diffusion_service::StableDiffusionService;
+use tt_application::services::state_declaration_service::StateDeclarationService;
+use tt_application::services::state_machine_service::StateMachineService;
+use tt_application::services::state_predicate_service::StatePredicateService;
 use tt_application::services::sync_automation_service::SyncAutomationService;
 use tt_application::services::theme_service::ThemeService;
 use tt_application::services::tokenization_service::TokenizationService;
@@ -47,6 +51,7 @@ use tt_application::services::tts_service::TtsService;
 use tt_application::services::update_service::UpdateService;
 use tt_application::services::user_directory_service::UserDirectoryService;
 use tt_application::services::user_endpoint_access_service::UserEndpointAccessService;
+use tt_application::services::similharity_service::SimilharityService;
 use tt_application::services::user_service::UserService;
 use tt_application::services::vector_service::VectorService;
 use tt_application::services::world_info_service::WorldInfoService;
@@ -98,6 +103,9 @@ pub(crate) struct AppServices {
     pub(crate) background_service: Arc<BackgroundService>,
     pub(crate) image_metadata_service: Arc<ImageMetadataService>,
     pub(crate) theme_service: Arc<ThemeService>,
+    pub(crate) state_declaration_service: Arc<StateDeclarationService>,
+    pub(crate) state_machine_service: Arc<StateMachineService>,
+    pub(crate) state_predicate_service: Arc<StatePredicateService>,
     pub(crate) preset_service: Arc<PresetService>,
     pub(crate) quick_reply_service: Arc<QuickReplyService>,
     pub(crate) agent_profile_service: Arc<AgentProfileService>,
@@ -106,6 +114,7 @@ pub(crate) struct AppServices {
     pub(crate) agent_run_history_service: Arc<AgentRunHistoryService>,
     pub(crate) agent_run_retention_automation_service: Arc<AgentRunRetentionAutomationService>,
     pub(crate) agent_runtime_service: Arc<AgentRuntimeService>,
+    pub(crate) recall_service: Arc<RecallService>,
     pub(crate) chat_completion_service: Arc<ChatCompletionService>,
     pub(crate) llm_connection_service: Arc<LlmConnectionService>,
     pub(crate) user_endpoint_access_service: Arc<UserEndpointAccessService>,
@@ -113,6 +122,7 @@ pub(crate) struct AppServices {
     pub(crate) provider_metadata_service: Arc<ProviderMetadataService>,
     pub(crate) searxng_search_service: Arc<SearxngSearchService>,
     pub(crate) vector_service: Arc<VectorService>,
+    pub(crate) similharity_service: Arc<SimilharityService>,
     pub(crate) tokenization_service: Arc<TokenizationService>,
     pub(crate) stable_diffusion_service: Arc<StableDiffusionService>,
     pub(crate) translate_service: Arc<TranslateService>,

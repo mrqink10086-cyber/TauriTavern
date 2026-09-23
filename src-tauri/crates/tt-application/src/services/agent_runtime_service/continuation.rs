@@ -25,6 +25,12 @@ pub(super) struct RunExecutionState {
     #[serde(default)]
     pub previous_published_state_id: Option<String>,
     pub blocked_reason: Option<String>,
+    /// Whether the state machine has already advanced for this run.
+    ///
+    /// A resumed run re-enters the finished branch without replaying the model
+    /// loop, and advancing twice would apply rules with side effects twice.
+    #[serde(default)]
+    pub state_machine_advanced: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

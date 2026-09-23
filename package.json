@@ -29,6 +29,7 @@
     "tauri:dev": "node scripts/tauri-app.mjs --prepare-frontend dev",
     "tauri:dev:pilot": "node scripts/tauri-app.mjs --prepare-frontend dev --features devtools-pilot --config src-tauri/crates/tauritavern/tauri.pilot.conf.json",
     "tauri:build": "node scripts/tauri-app.mjs --prepare-frontend build",
+    "release": "node scripts/build-release-package.mjs",
     "tauri:build:portable": "node scripts/build-portable.mjs",
     "tauri:build:portable:skip-web": "node scripts/build-portable.mjs --skip-web-build",
     "flatpak:build": "bash packaging/flatpak/build.sh",

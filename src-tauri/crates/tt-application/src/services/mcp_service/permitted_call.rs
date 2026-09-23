@@ -60,11 +60,25 @@ impl McpService {
                 format!("MCP server `{}` is paused", registration.display_name()),
             ));
         }
-        if registration.permission_for(tool_id.native_name()) == McpToolPermission::Off {
-            return Ok(not_sent(
-                "mcp.call_permission_off",
-                format!("MCP tool `{tool_id}` is Off"),
-            ));
+        match registration.permission_for(tool_id.native_name()) {
+            McpToolPermission::Allow => {}
+            McpToolPermission::Off => {
+                return Ok(not_sent(
+                    "mcp.call_permission_off",
+                    format!("MCP tool `{tool_id}` is Off"),
+                ));
+            }
+            // `Ask` promises an approval step that does not exist yet. Running
+            // the call anyway would make the setting a lie, so it is refused
+            // with the reason instead.
+            McpToolPermission::Ask => {
+                return Ok(not_sent(
+                    "mcp.call_permission_requires_approval",
+                    format!(
+                        "MCP tool `{tool_id}` is set to Ask, but approving a tool call is not implemented yet; set it to Allow to run it without approval"
+                    ),
+                ));
+            }
         }
         Ok(self
             .gateway

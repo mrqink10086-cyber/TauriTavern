@@ -7,12 +7,22 @@ use tt_domain::errors::DomainError;
 use tt_domain::models::agent::{AgentRun, AgentRunEvent, AgentRunEventLevel, AgentRunStatus};
 
 impl AgentRuntimeService {
+    /// Move a run to `status`.
+    ///
+    /// The execution loop and the cancel path both write here, so the
+    /// read-modify-write is serialized. Once a run is cancelling, a step that was
+    /// already in flight must not put it back to a running status — the run is
+    /// on its way out and only its terminal write may follow.
     pub(super) async fn transition_status(
         &self,
         run_id: &str,
         status: AgentRunStatus,
     ) -> Result<AgentRun, ApplicationError> {
+        let _guard = self.run_status_lock.lock().await;
         let mut run = self.run_repository.load_run(run_id).await?;
+        if run.status == AgentRunStatus::Cancelling && !status.is_terminal() {
+            return Ok(run);
+        }
         run.status = status;
         run.updated_at = Utc::now();
         self.run_repository.save_run(&run).await?;

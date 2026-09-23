@@ -14,8 +14,20 @@ import {
     DEFAULT_AGENT_CONTEXT_POLICY,
     normalizeAgentContextPolicy,
 } from '../../../tauritavern/agent/agent-context-policy.js';
+import {
+    stateAccessEntriesFromRows,
+    stateAccessRowsFromPolicy,
+    type StateAccessRow,
+} from './profile-state-access';
+import {
+    normalizeRecallPolicy,
+    recallDraftFromPolicy,
+    type AgentRecallDraft,
+} from './profile-recall';
+import { normalizeToolDescriptions } from './profile-tool-descriptions';
 
 const DEFAULT_MCP_RESULT_INLINE_CHAR_LIMIT = 50_000;
+const DEFAULT_UNFOLDED_TOOL_TURNS = 2;
 
 type AgentProfile = TauriTavernAgentProfileDefinition;
 
@@ -24,6 +36,18 @@ type AgentProfile = TauriTavernAgentProfileDefinition;
  * normalization converts it to a number.
  */
 export type AgentProfileDraftNumber = number | '';
+
+/**
+ * One World Info entry this Agent's context policy makes an exception for.
+ *
+ * Named by book and uid — the pair the scan keys entries by — because a comment
+ * is a title a human wrote and may repeat.
+ */
+export type WorldInfoEntryRule = {
+    book: string;
+    uid: number;
+    inject: boolean;
+};
 
 export type AgentProfileDraftDelegation = Omit<AgentProfile['delegation'],
     'maxConcurrentInvocations' | 'maxInvocationsPerRun' | 'maxHandoffDepth'> & {
@@ -38,7 +62,14 @@ export type AgentProfileDraftDelegation = Omit<AgentProfile['delegation'],
  * TauriTavernAgentProfileDefinition: it carries CSV mirrors of list fields
  * and ''-valued transient numeric inputs that only normalize at save time.
  */
-export type AgentProfileDraft = Omit<AgentProfile, 'run' | 'context' | 'delegation' | 'tools' | 'skills'> & {
+export type AgentProfileDraft = Omit<
+    AgentProfile,
+    'run' | 'context' | 'delegation' | 'tools' | 'skills' | 'stateAccess' | 'recall'
+> & {
+    /** Edited as rows; `profileForEdit` fills the defaults a row shows. */
+    stateAccess?: { entries?: StateAccessRow[] };
+    /** Two switches and a CSV mirror; `profileForEdit` fills what the editor shows. */
+    recall?: AgentRecallDraft;
     run: Omit<AgentProfile['run'], 'modelRetry'> & {
         modelRetry: {
             maxRetries: AgentProfileDraftNumber;
@@ -48,12 +79,19 @@ export type AgentProfileDraft = Omit<AgentProfile, 'run' | 'context' | 'delegati
     context: {
         initialChatHistoryMessages: AgentProfileDraftNumber;
         includeActivatedWorldInfo: boolean;
+        /** Edited as a list of entries from the chat's world books. */
+        worldInfo?: {
+            entries?: ReadonlyArray<WorldInfoEntryRule>;
+            subagentInherits?: boolean;
+        };
     };
     delegation: AgentProfileDraftDelegation;
-    tools: Omit<AgentProfile['tools'], 'maxRounds' | 'maxCallsPerRun' | 'mcpResultInlineCharLimit'> & {
+    tools: Omit<AgentProfile['tools'],
+        'maxRounds' | 'maxCallsPerRun' | 'mcpResultInlineCharLimit' | 'unfoldedToolTurns'> & {
         maxRounds: AgentProfileDraftNumber;
         maxCallsPerRun: AgentProfileDraftNumber;
         mcpResultInlineCharLimit: AgentProfileDraftNumber;
+        unfoldedToolTurns: AgentProfileDraftNumber;
     };
     skills: Omit<AgentProfile['skills'], 'maxReadCharsPerCall' | 'maxReadCharsPerRun'> & {
         maxReadCharsPerCall: AgentProfileDraftNumber;
@@ -101,55 +139,25 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
     return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-type ToolDescriptions = NonNullable<AgentProfile['tools']['toolDescriptions']>;
+/**
+ * The context policy a Profile stores.
+ *
+ * The same normalization the run uses, minus a field that has nothing to say: a
+ * Profile with no World Info exception stores none, rather than storing an empty
+ * list that the host would read as the default anyway.
+ */
+function contextPolicyForSave(context: AgentProfileDraft['context']): AgentProfile['context'] {
+    const normalized = normalizeAgentContextPolicy(context);
+    const { entries, subagentInherits } = normalized.worldInfo;
 
-function normalizeToolDescriptions(value: unknown): ToolDescriptions {
-    if (value == null) {
-        return {};
-    }
-    if (!isPlainObject(value)) {
-        throw new Error('tools.toolDescriptions must be an object');
-    }
-
-    const normalized: ToolDescriptions = {};
-    for (const [toolName, override] of Object.entries(value)) {
-        if (!isPlainObject(override)) {
-            throw new Error(`tools.toolDescriptions.${toolName} must be an object`);
+    return entries.length === 0 && !subagentInherits
+        ? {
+            initialChatHistoryMessages: normalized.initialChatHistoryMessages,
+            includeActivatedWorldInfo: normalized.includeActivatedWorldInfo,
         }
-
-        const description = override.description;
-        if (description !== undefined && typeof description !== 'string') {
-            throw new Error(`tools.toolDescriptions.${toolName}.description must be a string`);
-        }
-        const properties: Record<string, string> = {};
-        if (override.properties != null) {
-            if (!isPlainObject(override.properties)) {
-                throw new Error(`tools.toolDescriptions.${toolName}.properties must be an object`);
-            }
-            for (const [property, propertyDescription] of Object.entries(override.properties)) {
-                if (typeof propertyDescription !== 'string') {
-                    throw new Error(`tools.toolDescriptions.${toolName}.properties.${property} must be a string`);
-                }
-                if (propertyDescription.trim()) {
-                    properties[property] = propertyDescription;
-                }
-            }
-        }
-
-        const normalizedOverride: TauriTavernToolDescriptionOverride = {};
-        if (typeof description === 'string' && description.trim()) {
-            normalizedOverride.description = description;
-        }
-        if (Object.keys(properties).length > 0) {
-            normalizedOverride.properties = properties;
-        }
-        if (normalizedOverride.description || normalizedOverride.properties) {
-            normalized[toolName] = normalizedOverride;
-        }
-    }
-
-    return normalized;
+        : normalized;
 }
+
 
 function normalizePresetBinding(value: unknown): AgentProfile['preset'] {
     const binding = isPlainObject(value) ? { ...value } : {};
@@ -355,6 +363,7 @@ export function defaultProfile(id: string = DEFAULT_PROFILE_ID): AgentProfile {
             maxRounds: 80,
             maxCallsPerRun: 80,
             mcpResultInlineCharLimit: DEFAULT_MCP_RESULT_INLINE_CHAR_LIMIT,
+            unfoldedToolTurns: DEFAULT_UNFOLDED_TOOL_TURNS,
             maxCallsPerTool: {},
         },
         skills: {
@@ -405,10 +414,11 @@ export function normalizeProfileForSave(profile: AgentProfileDraft): TauriTavern
     normalized.preset = normalizePresetBinding(normalized.preset);
     normalized.model = normalizeModelBinding(normalized.model);
     normalized.run = normalizeRunPolicy(normalized.run);
-    normalized.context = normalizeAgentContextPolicy(normalized.context);
+    normalized.context = contextPolicyForSave(normalized.context);
     normalized.delegation = normalizeDelegationPolicy(normalized.delegation);
     normalized.tools.maxRounds = Number(normalized.tools.maxRounds);
     normalized.tools.maxCallsPerRun = Number(normalized.tools.maxCallsPerRun);
+    normalized.tools.unfoldedToolTurns = Number(normalized.tools.unfoldedToolTurns);
     normalized.tools.toolDescriptions = normalizeToolDescriptions(normalized.tools.toolDescriptions);
     normalized.skills.maxReadCharsPerCall = Number(normalized.skills.maxReadCharsPerCall);
     normalized.skills.maxReadCharsPerRun = Number(normalized.skills.maxReadCharsPerRun);
@@ -430,6 +440,10 @@ export function normalizeProfileForSave(profile: AgentProfileDraft): TauriTavern
         assemblyOrder: 0,
     };
     normalized.output.artifacts = [artifact];
+    normalized.stateAccess = {
+        entries: stateAccessEntriesFromRows(normalized.stateAccess?.entries ?? []),
+    };
+    normalized.recall = normalizeRecallPolicy(normalized.recall);
     // The normalizers above rewrote every draft-only field (CSV mirrors,
     // ''-valued numeric inputs) into the canonical shape.
     return normalized as TauriTavernAgentProfileDefinition;
@@ -447,6 +461,8 @@ export function profileForEdit(profile: TauriTavernAgentProfileDefinition): Agen
     draft.tools.toolDescriptions = normalizeToolDescriptions(draft.tools.toolDescriptions);
     draft.skills.visibleCsv = joinCsv(draft.skills.visible);
     draft.skills.denyCsv = joinCsv(draft.skills.deny);
+    draft.stateAccess = { entries: stateAccessRowsFromPolicy(profile.stateAccess) };
+    draft.recall = recallDraftFromPolicy(profile.recall);
     return draft;
 }
 
@@ -454,6 +470,9 @@ function migrateToolPolicyToV3(profile: AgentProfileDraft): void {
     const version = Number(profile.schemaVersion || 1);
     profile.tools.mcpResultInlineCharLimit = Number(
         profile.tools.mcpResultInlineCharLimit ?? DEFAULT_MCP_RESULT_INLINE_CHAR_LIMIT,
+    );
+    profile.tools.unfoldedToolTurns = Number(
+        profile.tools.unfoldedToolTurns ?? DEFAULT_UNFOLDED_TOOL_TURNS,
     );
     if (version === 3) {
         return;

@@ -15,6 +15,7 @@ use tt_domain::models::agent::profile::{
     AgentSkillPolicy, AgentToolPolicy, AgentWorkspacePolicy, ResolvedAgentOutputPolicy,
     ResolvedAgentProfile,
 };
+use tt_domain::models::agent::profile::DEFAULT_AGENT_TOOL_UNFOLDED_TURNS;
 use tt_domain::models::agent::{
     AGENT_RUN_SUMMARY_PROJECTION_SCHEMA_VERSION, AgentChatRef, AgentInvocation,
     AgentInvocationExitPolicy, AgentInvocationKind, AgentInvocationStatus, AgentRun,
@@ -30,7 +31,9 @@ use tt_ports::repositories::agent_run_repository::{
 use tt_ports::repositories::agent_workspace_lifecycle_repository::{
     AgentPersistentStatePruneRequest, AgentWorkspaceLifecycleRepository,
 };
-use tt_ports::repositories::workspace_repository::{WorkspaceRepository, WorkspaceWriteGuard};
+use tt_ports::repositories::workspace_repository::{
+    PersistentFileWrite, WorkspaceRepository, WorkspaceWriteGuard,
+};
 fn temp_root() -> PathBuf {
     std::env::temp_dir().join(format!("tauritavern-agent-repo-{}", Uuid::new_v4()))
 }
@@ -97,6 +100,15 @@ fn sample_manifest(run: &AgentRun) -> WorkspaceManifest {
                 writable: true,
                 commit: WorkspaceRootCommit::OnRunCompleted,
             },
+            WorkspaceRootSpec {
+                path: "state".to_string(),
+                lifecycle: WorkspaceRootLifecycle::Persistent,
+                scope: WorkspaceRootScope::Chat,
+                mount: WorkspaceRootMount::ProjectedOverlay,
+                visible: true,
+                writable: true,
+                commit: WorkspaceRootCommit::OnRunCompleted,
+            },
         ],
         artifacts: vec![ArtifactSpec {
             id: "main".to_string(),
@@ -149,6 +161,7 @@ fn sample_resolved_profile(manifest: &WorkspaceManifest) -> ResolvedAgentProfile
             max_rounds: 1,
             max_calls_per_run: 1,
             mcp_result_inline_char_limit: 50_000,
+            unfolded_tool_turns: DEFAULT_AGENT_TOOL_UNFOLDED_TURNS,
             max_calls_per_tool: Default::default(),
         },
         skills: AgentSkillPolicy {
@@ -180,6 +193,8 @@ fn sample_resolved_profile(manifest: &WorkspaceManifest) -> ResolvedAgentProfile
             message_body_artifact_id: "main".to_string(),
             message_body_path: "output/main.md".to_string(),
         },
+        state_access: Default::default(),
+        recall: Default::default(),
         source_trace: AgentProfileSourceTrace {
             profile_source: "test".to_string(),
         },
@@ -1245,6 +1260,11 @@ async fn persistent_workspace_projects_run_changes_only_after_commit() {
         .write_text(&run.id, &persist_path, "long running thread note")
         .await
         .expect("write persist projection");
+    let state_path = WorkspacePath::parse("state/current.txt").unwrap();
+    repository
+        .write_text(&run.id, &state_path, "date=2026/09/10")
+        .await
+        .expect("write state projection");
     fs::write(
         root.join("chats")
             .join(&run.workspace_id)
@@ -1283,8 +1303,15 @@ async fn persistent_workspace_projects_run_changes_only_after_commit() {
         .commit_persistent_changes(&run.id, None)
         .await
         .expect("commit persist changes");
-    assert_eq!(changes.changes.len(), 1);
-    assert_eq!(changes.changes[0].path, "persist/MEMORY.md");
+    assert_eq!(
+        changes
+            .changes
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["persist/MEMORY.md", "state/current.txt"],
+        "every declared persistent root must be published in the same version"
+    );
     let unchanged = repository
         .commit_persistent_changes(&run.id, Some(&changes.state_id))
         .await
@@ -1368,6 +1395,14 @@ async fn persistent_workspace_projects_run_changes_only_after_commit() {
         .await
         .expect("read committed persist projection");
     assert_eq!(projected.text, "long running thread note");
+    assert_eq!(
+        repository
+            .read_text(&next_run.id, &state_path)
+            .await
+            .expect("read committed state projection")
+            .text,
+        "date=2026/09/10"
+    );
 
     repository
         .copy_persistent_states(&run.workspace_id, "chat_fork")
@@ -1401,6 +1436,100 @@ async fn persistent_workspace_projects_run_changes_only_after_commit() {
     );
 
     fs::remove_dir_all(root).await.expect("cleanup");
+}
+
+#[tokio::test]
+async fn a_run_less_write_publishes_a_version_that_inherits_its_base() {
+    let root = temp_root();
+    let repository = FileAgentRepository::new(root.clone());
+    let run = sample_run_with_id("run_user_edit_a");
+    let manifest = sample_manifest(&run);
+    let profile = sample_resolved_profile(&manifest);
+
+    repository.create_run(&run).await.expect("create run");
+    repository
+        .initialize_run(
+            &run,
+            &manifest,
+            &serde_json::json!({"messages": []}),
+            &profile,
+        )
+        .await
+        .expect("initialize workspace");
+
+    let document_path = WorkspacePath::parse("state/document.json").unwrap();
+    repository
+        .write_text(&run.id, &document_path, "{\"fields\":[]}")
+        .await
+        .expect("write state projection");
+    let persist_path = WorkspacePath::parse("persist/MEMORY.md").unwrap();
+    repository
+        .write_text(&run.id, &persist_path, "long running thread note")
+        .await
+        .expect("write persist projection");
+
+    let base = repository
+        .commit_persistent_changes(&run.id, None)
+        .await
+        .expect("publish the run's own version");
+
+    let edited = repository
+        .publish_persistent_files(
+            &run.workspace_id,
+            Some(&base.state_id),
+            &[PersistentFileWrite {
+                path: document_path.clone(),
+                text: "{\"fields\":[{\"key\":\"环境/日期\",\"values\":[\"2026-09-23\"]}]}".to_string(),
+            }],
+        )
+        .await
+        .expect("publish the user's edit");
+
+    assert_ne!(edited.state_id, base.state_id, "an edit is a new version");
+    assert_eq!(edited.base_state_id.as_deref(), Some(base.state_id.as_str()));
+    assert_eq!(
+        edited
+            .changes
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["state/document.json"],
+        "only the edited file differs from the base"
+    );
+
+    let carried = repository
+        .read_persistent_state_file(&run.workspace_id, &edited.state_id, &persist_path)
+        .await
+        .expect("the new version must still carry the root it inherited");
+    assert_eq!(carried.text, "long running thread note");
+    let written = repository
+        .read_persistent_state_file(&run.workspace_id, &edited.state_id, &document_path)
+        .await
+        .expect("the edit must be readable from the new version");
+    assert!(
+        written.text.contains("2026-09-23"),
+        "the edited document is what the version stores: {}",
+        written.text
+    );
+
+    // Writing the same thing again is not a new floor.
+    let repeated = repository
+        .publish_persistent_files(
+            &run.workspace_id,
+            Some(&edited.state_id),
+            &[PersistentFileWrite {
+                path: document_path.clone(),
+                text: "{\"fields\":[{\"key\":\"环境/日期\",\"values\":[\"2026-09-23\"]}]}".to_string(),
+            }],
+        )
+        .await
+        .expect("re-publish an unchanged edit");
+
+    assert_eq!(
+        repeated.state_id, edited.state_id,
+        "an edit that changes nothing must reuse the version it started from"
+    );
+    assert!(repeated.changes.is_empty());
 }
 
 #[tokio::test]

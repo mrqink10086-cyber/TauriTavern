@@ -12,8 +12,8 @@ use tt_domain::models::agent::{
     AgentRun, WorkspaceManifest, WorkspacePath, WorkspacePersistentChangeSet,
 };
 use tt_ports::repositories::workspace_repository::{
-    WorkspaceAppendResult, WorkspaceEntry, WorkspaceEntryKind, WorkspaceFile, WorkspaceFileList,
-    WorkspaceRepository, WorkspaceWriteGuard,
+    PersistentFileWrite, WorkspaceAppendResult, WorkspaceEntry, WorkspaceEntryKind, WorkspaceFile,
+    WorkspaceFileList, WorkspaceRepository, WorkspaceWriteGuard,
 };
 
 #[async_trait]
@@ -27,6 +27,60 @@ impl WorkspaceRepository for FileAgentRepository {
         self.read_persistent_state_manifest(&state_dir, state_id)
             .await?;
         Ok(())
+    }
+
+    async fn read_persistent_state_file(
+        &self,
+        workspace_id: &str,
+        state_id: &str,
+        path: &WorkspacePath,
+    ) -> Result<WorkspaceFile, DomainError> {
+        let state_dir = self.persistent_state_dir(workspace_id, state_id)?;
+        let manifest = self
+            .read_persistent_state_manifest(&state_dir, state_id)
+            .await?;
+        if !manifest.files.iter().any(|file| file.path == path.as_str()) {
+            return Err(DomainError::NotFound(format!(
+                "agent.persistent_state_file_not_found: `{}` is not part of state `{state_id}`",
+                path.as_str()
+            )));
+        }
+
+        let target = state_dir.join(path.as_str());
+        let metadata = fs::symlink_metadata(&target).await.map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                DomainError::NotFound(format!(
+                    "agent.persistent_state_file_missing: {state_id} does not contain {}",
+                    path.as_str()
+                ))
+            } else {
+                DomainError::InternalError(format!(
+                    "Failed to inspect persistent state file {}: {error}",
+                    target.display()
+                ))
+            }
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(DomainError::InvalidData(format!(
+                "agent.persistent_state_file_invalid: {} is not a regular file",
+                target.display()
+            )));
+        }
+
+        let bytes = fs::read(&target).await.map_err(|error| {
+            DomainError::InternalError(format!(
+                "Failed to read persistent state file {}: {error}",
+                target.display()
+            ))
+        })?;
+        let text = String::from_utf8(bytes).map_err(|error| {
+            DomainError::InvalidData(format!(
+                "agent.persistent_state_file_not_utf8: {} is not UTF-8: {error}",
+                target.display()
+            ))
+        })?;
+
+        Ok(workspace_file_from_text(path.clone(), text))
     }
 
     async fn initialize_run(
@@ -352,6 +406,16 @@ impl WorkspaceRepository for FileAgentRepository {
         let _guard = self.persist_lock.lock().await;
         let changes = self.compute_persistent_changes(run_id).await?;
         self.commit_persistent_state(run_id, changes, previous_state_id)
+            .await
+    }
+
+    async fn publish_persistent_files(
+        &self,
+        workspace_id: &str,
+        base_state_id: Option<&str>,
+        files: &[PersistentFileWrite],
+    ) -> Result<WorkspacePersistentChangeSet, DomainError> {
+        self.publish_persistent_files(workspace_id, base_state_id, files)
             .await
     }
 }

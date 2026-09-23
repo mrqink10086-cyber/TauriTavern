@@ -535,7 +535,7 @@ async fn cancelled_prepared_call_is_not_sent_or_retained() {
 }
 
 #[tokio::test]
-async fn model_catalog_is_cached_only_and_ask_executes_like_allow() {
+async fn model_catalog_is_cached_only_and_ask_is_refused_until_it_is_allowed() {
     let repository = Arc::new(MemoryRepository::default());
     let gateway = Arc::new(FixedGateway::default());
     let service = McpService::new(repository.clone(), gateway.clone());
@@ -568,6 +568,27 @@ async fn model_catalog_is_cached_only_and_ask_executes_like_allow() {
     assert!(resolved.diagnostics.is_empty());
     assert_eq!(gateway.discovery_calls.load(Ordering::Relaxed), 1);
 
+    // `Ask` promises an approval step that does not exist yet, so the call is
+    // refused rather than run.
+    let outcome = service
+        .call_permitted_tool(
+            &tool_id,
+            json!({ "query": "rust" }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        McpCallOutcome::NotSent(McpCallIssue { ref code, .. })
+            if code == "mcp.call_permission_requires_approval"
+    ));
+    assert!(gateway.calls.lock().unwrap().is_empty());
+
+    service
+        .set_tool_permission(&created.id, "search".to_string(), McpToolPermission::Allow)
+        .await
+        .unwrap();
     let outcome = service
         .call_permitted_tool(
             &tool_id,
@@ -885,7 +906,12 @@ async fn legacy_call_uses_shared_permission_gate_and_preserves_raw_json() {
         .call_legacy_tool("legacy-empty", &tool_id, String::new())
         .await
         .unwrap();
-    assert!(matches!(outcome, McpCallOutcomeDto::KnownResponse { .. }));
+    assert!(matches!(
+        outcome,
+        McpCallOutcomeDto::NotSent { ref code, .. }
+            if code == "mcp.call_permission_requires_approval"
+    ));
+    assert!(gateway.calls.lock().unwrap().is_empty());
 
     service
         .set_tool_permission(&created.id, "search".to_string(), McpToolPermission::Allow)
@@ -900,10 +926,11 @@ async fn legacy_call_uses_shared_permission_gate_and_preserves_raw_json() {
         )
         .await
         .unwrap();
+    // The refused Ask call never reached the gateway, so the integer one is the
+    // only call there is.
     let calls = gateway.calls.lock().unwrap();
-    assert_eq!(calls.len(), 2);
-    assert!(calls[0].1.is_empty());
-    assert_eq!(calls[1].1["value"].to_string(), "9007199254740993");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].1["value"].to_string(), "9007199254740993");
 }
 
 #[tokio::test]

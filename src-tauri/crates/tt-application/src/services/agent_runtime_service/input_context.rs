@@ -37,7 +37,7 @@ impl AgentRuntimeService {
         })
     }
 
-    async fn find_last_chat_message(
+    pub(super) async fn find_last_chat_message(
         &self,
         chat_ref: &AgentChatRef,
     ) -> Result<Option<LocatedChatMessage>, ApplicationError> {
@@ -65,7 +65,7 @@ impl AgentRuntimeService {
         result.map_err(ApplicationError::from)
     }
 
-    async fn resolve_persist_base_state_id(
+    pub(super) async fn resolve_persist_base_state_id(
         &self,
         chat_ref: &AgentChatRef,
         raw_message_count: usize,

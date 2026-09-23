@@ -13,14 +13,18 @@ use crate::services::agent_profile_service::{
     AgentProfileResolveInput, AgentProfileService, ensure_profile_model_configured,
     materialize_agent_system_prompt,
 };
+use crate::services::agent_runtime_service::recall::RECALL_SNAPSHOT_KEY;
+use crate::services::agent_tools::ACCESS_SNAPSHOT_KEY;
 use crate::services::hashing::hex_lower;
 use crate::services::llm_connection_service::{
     self, LlmConnectionService, ResolvedLlmModelBinding,
 };
 use tt_domain::models::agent::AgentModelTool;
 use tt_domain::models::agent::profile::{
+    AgentRecallPolicy,
     AgentModelBindingMode, AgentPresetBindingMode, AgentPresetRef, ResolvedAgentProfile,
 };
+use tt_domain::models::state_access::StateAccessPolicy;
 use tt_domain::models::preset::{Preset, PresetType};
 use tt_domain::models::tool::ToolCatalog;
 use tt_ports::repositories::chat_completion_repository::ChatCompletionSource;
@@ -354,6 +358,50 @@ pub fn attach_frozen_run_input_snapshot(
         "frozenRunInputSnapshot".to_string(),
         frozen_run_input_snapshot,
     );
+    Ok(prompt_snapshot)
+}
+
+/// Record the resolved Profile's per-field state access in the run input.
+///
+/// Access travels with the frozen run input for the same reason the declaration
+/// does: `state.update` reads it from there, and a run has to be governed by the
+/// access it started with. An unconfigured policy is written out as such rather
+/// than omitted, so the frozen input shows whether access was configured at all.
+pub fn attach_state_access_policy(
+    mut prompt_snapshot: Value,
+    policy: &StateAccessPolicy,
+) -> Result<Value, ApplicationError> {
+    let object = prompt_snapshot.as_object_mut().ok_or_else(|| {
+        ApplicationError::ValidationError(
+            "agent.prompt_snapshot_invalid: promptSnapshot must be an object".to_string(),
+        )
+    })?;
+    let value = serde_json::to_value(policy).map_err(|error| {
+        ApplicationError::InternalError(format!("agent.state_access_serialize_failed: {error}"))
+    })?;
+    object.insert(ACCESS_SNAPSHOT_KEY.to_string(), value);
+    Ok(prompt_snapshot)
+}
+
+/// Record the resolved Profile's recall policy in the run input.
+///
+/// A delegated invocation reads it from there to decide whether it carries the
+/// blocks its parent was given — the same reason access travels with the run
+/// input: a sub-agent is governed by the run it belongs to, not by whatever the
+/// Profile says at the moment it starts.
+pub fn attach_recall_policy(
+    mut prompt_snapshot: Value,
+    policy: &AgentRecallPolicy,
+) -> Result<Value, ApplicationError> {
+    let object = prompt_snapshot.as_object_mut().ok_or_else(|| {
+        ApplicationError::ValidationError(
+            "agent.prompt_snapshot_invalid: promptSnapshot must be an object".to_string(),
+        )
+    })?;
+    let value = serde_json::to_value(policy).map_err(|error| {
+        ApplicationError::InternalError(format!("agent.recall_serialize_failed: {error}"))
+    })?;
+    object.insert(RECALL_SNAPSHOT_KEY.to_string(), value);
     Ok(prompt_snapshot)
 }
 

@@ -16,6 +16,7 @@
 @import url(css/backgrounds.css);
 @import url(css/chat-backups.css);
 @import url(css/tauritavern-embedded-runtime.css);
+@import url(css/state-panel.css);
 
 :root {
     interpolate-size: allow-keywords;

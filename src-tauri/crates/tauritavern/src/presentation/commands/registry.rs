@@ -314,6 +314,29 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         // Theme commands
         super::theme_commands::save_theme,
         super::theme_commands::delete_theme,
+        // State declaration commands
+        super::state_declaration_commands::save_state_declaration,
+        super::state_declaration_commands::get_state_declaration,
+        super::state_declaration_commands::list_state_declarations,
+        super::state_declaration_commands::delete_state_declaration,
+        super::state_injection_commands::get_state_injection,
+        super::state_panel_commands::get_state_panel,
+        super::state_edit_commands::update_state_values,
+        super::state_edit_commands::update_state_prose,
+        super::state_machine_commands::save_state_machine,
+        super::state_machine_commands::get_state_machine,
+        super::state_machine_commands::list_state_machines,
+        super::state_machine_commands::delete_state_machine,
+        super::state_machine_commands::validate_state_machine,
+        super::state_machine_commands::evaluate_state_machine,
+        // State predicate commands
+        super::state_predicate_commands::save_state_predicate_set,
+        super::state_predicate_commands::get_state_predicate_set,
+        super::state_predicate_commands::list_state_predicate_sets,
+        super::state_predicate_commands::delete_state_predicate_set,
+        super::state_predicate_commands::validate_state_predicate_set,
+        super::state_predicate_commands::evaluate_state_predicate_set,
+        super::state_predicate_commands::get_state_predicate_entries,
         // Preset commands
         super::preset_commands::save_preset,
         super::preset_commands::delete_preset,
@@ -326,6 +349,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         // Quick reply commands
         super::quick_reply_commands::save_quick_reply_set,
         super::quick_reply_commands::delete_quick_reply_set,
+        // Recall commands
+        super::recall_commands::recall_bind_state_floors,
         // Agent runtime commands
         super::agent_commands::start_agent_run,
         super::agent_commands::read_agent_run_checkpoint,
@@ -386,6 +411,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         super::stable_diffusion_commands::sd_handle,
         super::stable_diffusion_commands::cancel_sd_request,
         super::vector_commands::vector_handle,
+        // Similharity compatibility bridge (VectFox extension)
+        super::similharity_commands::similharity_handle,
         // Translate commands
         super::translate_commands::translate_text,
         // TTS commands

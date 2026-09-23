@@ -48,6 +48,19 @@ impl ActiveRunHandle {
     }
 }
 
+impl Drop for ActiveRunHandle {
+    /// Stop anything still running when the last reference goes away.
+    ///
+    /// Dropping a `JoinHandle` detaches its task rather than stopping it, so a
+    /// run whose slot is released while its workers are alive would keep making
+    /// provider calls with nothing left that could reach it. Nothing here can
+    /// persist: this is a backstop for the paths that already gave up.
+    fn drop(&mut self) {
+        let _ = self.cancel_sender.send(true);
+        self.scheduler.abort_workers();
+    }
+}
+
 struct AgentTaskWorker {
     cancel_sender: watch::Sender<bool>,
     join: JoinHandle<Result<Option<InvocationFrame>, ApplicationError>>,
@@ -222,6 +235,18 @@ impl AgentTaskScheduler {
 
     pub(super) fn subscribe(&self) -> watch::Receiver<u64> {
         self.changes.subscribe()
+    }
+
+    /// Abort every worker task. Only for teardown: dropping a `JoinHandle`
+    /// detaches the task instead of stopping it.
+    fn abort_workers(&self) {
+        let mut workers = self
+            .workers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for (_, worker) in workers.drain() {
+            worker.join.abort();
+        }
     }
 
     fn cancel_task_worker(&self, task_id: &str) {

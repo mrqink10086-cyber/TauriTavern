@@ -11,7 +11,8 @@ use super::preset_refs::validate_preset_binding;
 use super::validation::{
     migrate_profile_schema, normalize_context_policy, validate_delegation_policy,
     validate_instructions, validate_model_binding, validate_plan_policy, validate_profile_header,
-    validate_run_policy, validate_skill_policy, validate_tool_policy, validate_workspace_policy,
+    validate_run_policy, validate_skill_policy, validate_state_access_policy, validate_tool_policy,
+    validate_workspace_policy,
 };
 use super::{AgentProfileExternalReferencePolicy, AgentProfileResolveInput, AgentProfileService};
 
@@ -124,6 +125,7 @@ impl AgentProfileService {
         validate_run_policy(&definition.run, &definition.delegation, &tools)?;
         validate_skill_policy(&definition.skills)?;
         validate_workspace_policy(&definition.workspace)?;
+        validate_state_access_policy(&definition.state_access)?;
         let output = resolve_output_policy(&definition.output, &definition.workspace)?;
 
         Ok(ResolvedAgentProfile {
@@ -141,6 +143,8 @@ impl AgentProfileService {
             tools,
             skills: definition.skills,
             workspace: definition.workspace,
+            state_access: definition.state_access,
+            recall: definition.recall,
             plan: definition.plan,
             output,
             source_trace: AgentProfileSourceTrace {

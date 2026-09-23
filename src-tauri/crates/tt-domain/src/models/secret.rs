@@ -194,6 +194,10 @@ impl SecretKeys {
     pub const KOBOLDCPP: &'static str = "api_key_koboldcpp";
     pub const LLAMACPP: &'static str = "api_key_llamacpp";
     pub const COHERE: &'static str = "api_key_cohere";
+    /// Qdrant API key used by the Similharity compatibility bridge. The slot name
+    /// matches the Similharity server plugin's custom slot so users who moved
+    /// from the plugin keep a working key.
+    pub const QDRANT: &'static str = "api_key_qdrant";
     pub const PERPLEXITY: &'static str = "api_key_perplexity";
     pub const GROQ: &'static str = "api_key_groq";
     pub const AZURE_TTS: &'static str = "api_key_azure_tts";

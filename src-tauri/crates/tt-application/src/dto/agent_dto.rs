@@ -11,10 +11,137 @@ use tt_domain::models::agent::{
     AgentRunStatus, AgentTaskStatus,
 };
 use tt_domain::models::mcp::McpToolPermission;
+use tt_domain::models::state::{StateDeclaration, StateUpdateRequest};
+use tt_domain::models::state_machine::StateMachineSpec;
+use tt_domain::models::state_predicate::StatePredicateSet;
 use tt_domain::models::tool::ToolId;
 use tt_ports::repositories::agent_profile_storage_health_repository::{
     AgentProfileStorageIssue, AgentProfileStorageRepairAction,
 };
+
+/// Ask for the panels one chat shows.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentStatePanelDto {
+    pub chat_ref: AgentChatRef,
+    #[serde(default, alias = "stableId")]
+    pub stable_chat_id: String,
+    /// The declaration bound to this chat, resolved by the host. It carries both
+    /// the key space and the display configuration, so the panel and the model
+    /// always read the same declaration.
+    pub declaration: StateDeclaration,
+}
+
+/// One field an interface write sets or clears.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentStateFieldDto {
+    pub key: String,
+    /// One entry per line. An empty list clears the field without deleting it.
+    #[serde(default)]
+    pub value: Vec<String>,
+}
+
+/// Write state from the interface, as the person using it.
+///
+/// The declaration and the machine travel with the request because the host owns
+/// their bindings, exactly as they do for the panel above. The request has the
+/// same shape the model's `state.update` takes — the same operation, so the same
+/// three states — and `recalculate` asks the machine's hook to recompute derived
+/// values after the edit, in the same published version.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentStateEditDto {
+    pub chat_ref: AgentChatRef,
+    #[serde(default, alias = "stableId")]
+    pub stable_chat_id: String,
+    pub declaration: StateDeclaration,
+    #[serde(default)]
+    pub machine: Option<StateMachineSpec>,
+    #[serde(default)]
+    pub fields: Vec<AgentStateFieldDto>,
+    #[serde(default)]
+    pub remove: Vec<String>,
+    #[serde(default)]
+    pub recalculate: bool,
+    /// The model this chat is talking to.
+    ///
+    /// A scene may follow the model to decide which vocabulary counts its
+    /// tokens; a click has no run behind it, so the panel says which model that
+    /// is rather than making the user name a tokenizer twice.
+    #[serde(default)]
+    pub tokenizer_model: Option<String>,
+}
+
+impl AgentStateEditDto {
+    /// The domain's raw request, spelled the way every other writer spells it.
+    pub fn request(&self) -> StateUpdateRequest {
+        StateUpdateRequest {
+            fields: self
+                .fields
+                .iter()
+                .map(|field| (field.key.clone(), field.value.clone()))
+                .collect(),
+            remove: self.remove.clone(),
+        }
+    }
+}
+
+/// Write one prose block from the interface.
+///
+/// Prose is a file, not a field: no key to address it by, no switches, no value
+/// limit. It is named by the path the panel read it from, and the host refuses
+/// any path this chat's own declaration does not name — the panel's write path
+/// must not become a way to write any file in the workspace.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentStateProseEditDto {
+    pub chat_ref: AgentChatRef,
+    #[serde(default, alias = "stableId")]
+    pub stable_chat_id: String,
+    pub declaration: StateDeclaration,
+    pub path: String,
+    #[serde(default)]
+    pub text: String,
+}
+
+/// Ask for the state slice one Profile may see in one chat.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentStateInjectionDto {
+    pub chat_ref: AgentChatRef,
+    #[serde(default, alias = "stableId")]
+    pub stable_chat_id: String,
+    /// The Profile whose access decides the slice. Absent means the default
+    /// Profile, which resolves to "nothing configured" until the user sets it.
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    /// The declaration bound to this chat, resolved by the host. A field's own
+    /// default decides injection when the Profile is silent, so the slice needs
+    /// the key space and not just the Profile's exceptions.
+    #[serde(default)]
+    pub declaration: StateDeclaration,
+}
+
+/// Ask for the entries one predicate set selects in one chat.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentStatePredicateEntriesDto {
+    pub chat_ref: AgentChatRef,
+    #[serde(default, alias = "stableId")]
+    pub stable_chat_id: String,
+    /// The predicate set this chat is bound to, resolved by the host. The host
+    /// sends the name rather than the document so the entries are always produced
+    /// from the saved set. Absent when the set travels inside the declaration.
+    #[serde(default)]
+    pub name: String,
+    /// The set itself, when it travels inside the chat's declaration: a scene
+    /// keeps its conditionally injected text with its fields, and then there is
+    /// no named set to look up. Exactly one of `name` and `set` is used, and
+    /// `set` wins.
+    #[serde(default)]
+    pub set: Option<StatePredicateSet>,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]

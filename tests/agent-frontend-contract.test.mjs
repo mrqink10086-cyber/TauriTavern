@@ -78,6 +78,7 @@ test('Agent System settings use the extension store and publish changes', async 
         editingProfileId: 'default-writer',
         activeTab: 'profiles',
         runTimelineHeightPx: null,
+        defaultSceneSeedVersion: 0,
     });
     assert.equal(writes.length, 0);
 
@@ -92,6 +93,7 @@ test('Agent System settings use the extension store and publish changes', async 
         editingProfileId: 'legacy-writer',
         activeTab: 'profiles',
         runTimelineHeightPx: null,
+        defaultSceneSeedVersion: 0,
     });
 
     let emitted = null;
@@ -113,6 +115,7 @@ test('Agent System settings use the extension store and publish changes', async 
         editingProfileId: 'editor',
         activeTab: 'profiles',
         runTimelineHeightPx: null,
+        defaultSceneSeedVersion: 0,
     });
     assert.deepEqual(emitted, saved);
 });
@@ -210,6 +213,7 @@ test('Agent generation router refreshes Model Target LLM connection before Agent
     assert.deepEqual(options.agentContextPolicy, {
         initialChatHistoryMessages: 4,
         includeActivatedWorldInfo: false,
+        worldInfo: { entries: [], subagentInherits: false },
     });
 });
 
@@ -275,6 +279,7 @@ test('Agent context policy windows latest-first prompt history without mutating 
     }), {
         initialChatHistoryMessages: 0,
         includeActivatedWorldInfo: true,
+        worldInfo: { entries: [], subagentInherits: false },
     });
     assert.deepEqual(contextPolicy.applyInitialChatHistoryPolicy(chat, {
         initialChatHistoryMessages: 0,
@@ -317,6 +322,85 @@ test('Agent context policy windows latest-first prompt history without mutating 
 
 
 
+
+test('Agent context policy names the World Info entries an Agent may not be told', async () => {
+    const contextPolicy = await importFresh('src/scripts/tauritavern/agent/agent-context-policy.js');
+
+    // The switch says entries are injected; this row keeps one of them out.
+    const filter = contextPolicy.worldInfoEntryFilter({
+        includeActivatedWorldInfo: true,
+        worldInfo: { entries: [{ book: 'Char Lore', uid: 7, inject: false }] },
+    });
+    assert.equal(filter({ world: 'Char Lore', uid: 7 }), false);
+    assert.equal(filter({ world: 'Char Lore', uid: 8 }), true);
+    assert.equal(filter({ world: 'Other Book', uid: 7 }), true);
+
+    // The row works in the other direction too: the switch says entries are not
+    // injected, and this one entry is.
+    const narrowing = contextPolicy.worldInfoEntryFilter({
+        includeActivatedWorldInfo: false,
+        worldInfo: { entries: [{ book: 'House Rules', uid: 2, inject: true }] },
+    });
+    assert.equal(narrowing({ world: 'House Rules', uid: 2 }), true);
+    assert.equal(narrowing({ world: 'House Rules', uid: 3 }), false);
+    assert.equal(narrowing({ world: 'Char Lore', uid: 7 }), false);
+
+    // Nothing configured leaves the scan exactly as it was.
+    assert.equal(contextPolicy.worldInfoEntryFilter({ includeActivatedWorldInfo: true }), null);
+
+    // Whether the scan has to run is not the switch alone: a row that lets an
+    // entry through means there is something to find while the switch says there
+    // is not.
+    assert.equal(contextPolicy.worldInfoScanNeeded({ includeActivatedWorldInfo: true }), true);
+    assert.equal(contextPolicy.worldInfoScanNeeded({ includeActivatedWorldInfo: false }), false);
+    assert.equal(contextPolicy.worldInfoScanNeeded({
+        includeActivatedWorldInfo: false,
+        worldInfo: { entries: [{ book: 'House Rules', uid: 2, inject: true }] },
+    }), true);
+
+    // A row that names no book, or no entry, is dropped: an empty book name would
+    // otherwise match entries in a book that does not exist.
+    assert.deepEqual(contextPolicy.normalizeAgentContextPolicy({
+        worldInfo: {
+            entries: [
+                { book: '   ', uid: 1, inject: false },
+                { book: 'Char Lore', uid: 'not a number', inject: false },
+                { book: ' Char Lore ', uid: 3, inject: false },
+            ],
+        },
+    }).worldInfo.entries, [{ book: 'Char Lore', uid: 3, inject: false }]);
+});
+
+test('Agent world info entry decision reads rows over the switch and drops rows that say nothing', async () => {
+    const contextPolicy = await importFresh('src/scripts/tauritavern/agent/agent-context-policy.js');
+    const entry = { world: 'Char Lore', uid: 7 };
+
+    // The switch says entries are injected; this row keeps one of them out.
+    const keepingOut = {
+        includeActivatedWorldInfo: true,
+        worldInfo: { subagentInherits: true, entries: [{ book: 'Char Lore', uid: 7, inject: false }] },
+    };
+    assert.equal(contextPolicy.worldInfoEntryCarriedBy(keepingOut, entry), false);
+
+    // No row keeps the switch, which is the reading a delegated invocation gets.
+    assert.equal(contextPolicy.worldInfoEntryCarriedBy({ worldInfo: { subagentInherits: true } }, entry), true);
+
+    // A decision the switch already makes is not worth storing: setting an entry
+    // to what the switch says removes its row instead of pinning it.
+    const withRow = contextPolicy.worldInfoPolicyWithEntry({ worldInfo: { subagentInherits: true } }, entry, true);
+    assert.deepEqual(withRow.worldInfo.entries, []);
+
+    // The other direction is the one that has to survive: the switch says no,
+    // this one entry is carried anyway.
+    const lettingThrough = contextPolicy.worldInfoPolicyWithEntry({ worldInfo: { subagentInherits: false } }, entry, true);
+    assert.deepEqual(lettingThrough.worldInfo.entries, [{ book: 'Char Lore', uid: 7, inject: true }]);
+    assert.equal(contextPolicy.worldInfoEntryCarriedBy(lettingThrough, entry), true);
+
+    // The rest of the policy travels with the decision, since it is written back
+    // as the Profile's whole context.
+    assert.equal(lettingThrough.includeActivatedWorldInfo, true);
+    assert.equal(lettingThrough.initialChatHistoryMessages, -1);
+});
 
 test('Agent run controller tracks active runs until terminal events', async () => {
     let listener = null;

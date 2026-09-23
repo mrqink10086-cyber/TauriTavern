@@ -73,6 +73,9 @@ test('/api/characters/import returns canonical character payload and Agent post-
         post_import: {
             has_agent_profiles: true,
             has_agent_skills: true,
+            has_state_declarations: false,
+            has_state_machines: false,
+            has_state_predicates: false,
         },
     });
     assert.deepEqual(calls, [

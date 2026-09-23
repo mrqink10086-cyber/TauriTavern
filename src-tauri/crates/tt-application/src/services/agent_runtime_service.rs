@@ -20,6 +20,7 @@ use crate::services::agent_tools::{
 use crate::services::llm_connection_service::LlmConnectionService;
 use crate::services::mcp_service::{McpModelToolDiagnostic, McpService};
 use crate::services::prompt_assembly_service::PromptAssemblyService;
+use crate::services::recall_service::RecallService;
 use crate::services::skill_service::SkillService;
 use tt_domain::models::agent::profile::ResolvedAgentProfile;
 use tt_domain::models::agent::{
@@ -33,10 +34,12 @@ use tt_ports::repositories::agent_invocation_repository::AgentInvocationReposito
 use tt_ports::repositories::agent_run_repository::AgentRunRepository;
 use tt_ports::repositories::chat_repository::ChatRepository;
 use tt_ports::repositories::group_chat_repository::GroupChatRepository;
+use tt_ports::repositories::tokenizer_repository::TokenizerRepository;
 use tt_ports::repositories::workspace_repository::WorkspaceRepository;
 use tt_ports::skill_script::SkillScriptEngine;
 
 mod artifacts;
+
 mod checkpoint;
 mod commit;
 mod commit_ledger;
@@ -57,11 +60,21 @@ mod model_stream_projection;
 mod model_turn_display;
 mod prompt_assembly;
 mod prompt_snapshot;
+pub(crate) mod recall;
+pub(crate) mod world_info;
 mod revision;
 mod scheduler;
 mod skill_scope;
+mod state_edit;
+mod state_injection;
+mod state_machine;
+mod state_panel;
+mod state_predicate;
 mod task_details;
 mod timeline_projection;
+
+use crate::services::state_runtime::resolve_state_value_measure;
+use tt_domain::models::state::{CostUnit, StateDeclaration, count_chars};
 mod tool_execution;
 mod tool_snapshot;
 
@@ -72,6 +85,10 @@ pub use model_stream_projection::{
     AgentRunLiveCall, AgentRunLiveCallKey, AgentRunLiveProjection, AgentRunLiveReasoning,
     ModelAttemptGeneration, ToolCallProjection,
 };
+pub use state_edit::{StateEditDto, StateProseEditDto};
+pub use state_injection::StateInjectionDto;
+pub use state_panel::StatePanelDto;
+pub use state_predicate::StatePredicateEntryDto;
 use scheduler::ActiveRunHandle;
 
 pub(super) type AgentCancelReceiver = watch::Receiver<bool>;
@@ -136,14 +153,30 @@ pub struct AgentRuntimeService {
     prompt_assembly_service: Arc<PromptAssemblyService>,
     skill_service: Arc<SkillService>,
     mcp_service: Arc<McpService>,
+    script_engine: Arc<dyn SkillScriptEngine>,
+    recall_service: Arc<RecallService>,
     tool_registry: BuiltinAgentToolRegistry,
     tool_dispatcher: AgentToolDispatcher,
     active_runs: RwLock<HashMap<String, Arc<ActiveRunHandle>>>,
     run_lifecycle_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes the read-modify-write behind `transition_status`.
+    ///
+    /// Separate from `run_lifecycle_lock`, which the cancel path already holds
+    /// when it writes a status: a tokio mutex is not reentrant, and taking the
+    /// same one twice would deadlock.
+    run_status_lock: tokio::sync::Mutex<()>,
     active_chat_commits: RwLock<HashMap<String, PendingHostChatCommit>>,
     active_prompt_assemblies: RwLock<HashMap<String, PendingHostPromptAssembly>>,
     active_persistent_state_metadata_updates:
         RwLock<HashMap<String, PendingPersistentStateMetadataUpdate>>,
+    /// The vocabulary a scene counts its values with, when it asks for tokens.
+    ///
+    /// Set once by the composition root rather than arriving through `new`:
+    /// counting in tokens is one scene's option, and every construction site —
+    /// the app and each contract test — would otherwise have to name a
+    /// tokenizer it never uses. Absent means token ceilings cannot be honoured,
+    /// which is reported rather than papered over.
+    state_tokenizer: Arc<std::sync::OnceLock<Arc<dyn TokenizerRepository>>>,
 }
 
 impl AgentRuntimeService {
@@ -164,15 +197,22 @@ impl AgentRuntimeService {
         prompt_assembly_service: Arc<PromptAssemblyService>,
         mcp_service: Arc<McpService>,
         skill_script_engine: Arc<dyn SkillScriptEngine>,
+        recall_service: Arc<RecallService>,
     ) -> Self {
         let tool_registry = BuiltinAgentToolRegistry::all();
+        // One cell, two readers: a tool writes state through the dispatcher, and
+        // the completion pass writes it through this service, and both have to
+        // count a value the same way.
+        let state_tokenizer: Arc<std::sync::OnceLock<Arc<dyn TokenizerRepository>>> =
+            Arc::new(std::sync::OnceLock::new());
         let tool_dispatcher = AgentToolDispatcher::new(
             run_repository.clone(),
             chat_repository.clone(),
             group_chat_repository.clone(),
             workspace_repository.clone(),
             skill_service.clone(),
-            skill_script_engine,
+            skill_script_engine.clone(),
+            Arc::clone(&state_tokenizer),
         );
         Self {
             run_repository,
@@ -186,13 +226,75 @@ impl AgentRuntimeService {
             prompt_assembly_service,
             skill_service,
             mcp_service,
+            // The panel reads state and runs a picture set's condition script;
+            // that script runs in the same sandbox the skills and the machine
+            // hooks use, so there is one place a script can execute.
+            script_engine: skill_script_engine,
+            recall_service,
             tool_registry,
             tool_dispatcher,
             active_runs: RwLock::new(HashMap::new()),
             run_lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
+            run_status_lock: tokio::sync::Mutex::new(()),
             active_chat_commits: RwLock::new(HashMap::new()),
             active_prompt_assemblies: RwLock::new(HashMap::new()),
             active_persistent_state_metadata_updates: RwLock::new(HashMap::new()),
+            state_tokenizer,
+        }
+    }
+
+    /// Hand the runtime the vocabulary a scene may count its values with.
+    ///
+    /// Called once by the composition root. A second call is ignored rather than
+    /// an error: the value is a capability, and the first answer is the one
+    /// every write is already using.
+    pub fn set_state_tokenizer(&self, tokenizer: Arc<dyn TokenizerRepository>) {
+        let _ = self.state_tokenizer.set(tokenizer);
+    }
+
+    /// The vocabulary, when the host wired one in.
+    pub(crate) fn state_tokenizer(&self) -> Option<&Arc<dyn TokenizerRepository>> {
+        self.state_tokenizer.get()
+    }
+
+    /// Check a declaration's initial values in the unit its scene counts in.
+    ///
+    /// Run before a declaration is stored. An initial value is seeded into the
+    /// document and injected from there, so one over the scene's ceiling would
+    /// never pass a write and would never be noticed either — which is why this
+    /// check cannot be left to the character rule the declaration service can do
+    /// on its own.
+    pub async fn validate_state_initial_values(
+        &self,
+        declaration: &StateDeclaration,
+        tokenizer_model: Option<&str>,
+    ) -> Result<(), ApplicationError> {
+        let mut errors = declaration.initial_value_shape_errors();
+
+        let has_initial_values = declaration
+            .fields
+            .iter()
+            .any(|field| !field.initial.is_empty());
+        if declaration.limits.unit == CostUnit::Chars {
+            errors.extend(declaration.initial_value_ceiling_errors(&|value| Ok(count_chars(value))));
+        } else if has_initial_values {
+            // Only a scene that carries initial values has something that cannot
+            // be checked without a vocabulary, so only that scene hears about a
+            // missing one. Every other token scene saves without naming a
+            // model, and its writes are measured when they happen.
+            let measure =
+                resolve_state_value_measure(declaration, tokenizer_model, self.state_tokenizer())
+                    .await?;
+            errors.extend(declaration.initial_value_ceiling_errors(&|value| measure.count(value)));
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(ApplicationError::ValidationError(format!(
+                "state_declaration.invalid_initial: {}",
+                errors.join("; ")
+            )))
         }
     }
 

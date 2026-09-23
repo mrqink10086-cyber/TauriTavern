@@ -70,6 +70,21 @@ impl VectorService {
         }
     }
 
+    /// Embedding entry point shared with the Similharity bridge.
+    ///
+    /// The bridge forwards the extension's embedding requests through the same
+    /// provider selection the `/api/vector/*` routes use, so provider mapping and
+    /// normalization stay in one place instead of growing a second implementation.
+    pub async fn embed_texts(
+        &self,
+        request: &VectorRouteRequestDto,
+        texts: Vec<String>,
+        is_query: bool,
+    ) -> Result<Vec<Vec<f32>>, ApplicationError> {
+        let context = SourceContext::from_request(request)?;
+        self.embeddings(&context, request, texts, is_query).await
+    }
+
     async fn list(
         &self,
         request: VectorRouteRequestDto,
@@ -111,6 +126,11 @@ impl VectorService {
                     hash: item.hash,
                     text: item.text,
                     index: item.index,
+                    // The vectors extension indexes text, not floors: recall
+                    // fields stay absent rather than carrying a placeholder.
+                    floor: None,
+                    field_key: None,
+                    kind: None,
                 },
                 embedding,
             })
@@ -784,7 +804,7 @@ fn source_model(source: VectorSource, requested: &str) -> String {
     .to_string()
 }
 
-fn normalize_embeddings(
+pub(crate) fn normalize_embeddings(
     mut embeddings: Vec<Vec<f32>>,
     expected_count: usize,
 ) -> Result<Vec<Vec<f32>>, ApplicationError> {
@@ -927,24 +947,27 @@ mod tests {
         assert!((normalized[0][1] - 0.8).abs() < 1e-6);
     }
 
+    fn metadata(hash: i64, text: &str, index: i64) -> VectorMetadata {
+        VectorMetadata {
+            hash,
+            text: text.to_string(),
+            index,
+            floor: None,
+            field_key: None,
+            kind: None,
+        }
+    }
+
     #[test]
     fn query_threshold_filters_hashes_and_metadata_together() {
         let result = query_result(
             vec![
                 VectorMatch {
-                    metadata: VectorMetadata {
-                        hash: 1,
-                        text: "keep".to_string(),
-                        index: 0,
-                    },
+                    metadata: metadata(1, "keep", 0),
                     score: 0.8,
                 },
                 VectorMatch {
-                    metadata: VectorMetadata {
-                        hash: 2,
-                        text: "drop".to_string(),
-                        index: 1,
-                    },
+                    metadata: metadata(2, "drop", 1),
                     score: 0.2,
                 },
             ],

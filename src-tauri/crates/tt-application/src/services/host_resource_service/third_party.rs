@@ -9,8 +9,22 @@ use tt_ports::host_resource::{
 
 const THIRD_PARTY_ALLOWED_METHODS: &str = "GET, HEAD, OPTIONS";
 const MAX_MOBILE_INLINE_THIRD_PARTY_ASSET_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_DESKTOP_INLINE_THIRD_PARTY_ASSET_BYTES: u64 = 256 * 1024 * 1024;
 const THIRD_PARTY_LAYER_COMPAT_QUERY: &str = "ttCompat=layer";
 const THIRD_PARTY_LAYER_COMPAT_REVISION: &[u8] = b"tt-compat-layer-v1";
+
+/// Upper bound for a third-party asset that is read into memory as a whole.
+///
+/// Inline assets are extension resources (CSS, JS, HTML, images, fonts); the desktop
+/// allowance is far above anything a real extension ships, and exists so that a stray
+/// multi-gigabyte file cannot be pulled into memory by a single request.
+fn max_inline_third_party_asset_bytes() -> u64 {
+    if cfg!(mobile) {
+        MAX_MOBILE_INLINE_THIRD_PARTY_ASSET_BYTES
+    } else {
+        MAX_DESKTOP_INLINE_THIRD_PARTY_ASSET_BYTES
+    }
+}
 
 pub(super) fn serve_third_party_asset(
     store: &dyn HostResourceAssetStore,
@@ -46,17 +60,18 @@ pub(super) fn serve_third_party_asset(
         }
         Err(error) => return store_error_response(error),
     };
-    if cfg!(mobile) && opened.metadata.content_length > MAX_MOBILE_INLINE_THIRD_PARTY_ASSET_BYTES {
+    let max_inline_bytes = max_inline_third_party_asset_bytes();
+    if opened.metadata.content_length > max_inline_bytes {
         tracing::warn!(
             "Rejected large third-party asset ({} bytes > {} bytes): {}/{}",
             opened.metadata.content_length,
-            MAX_MOBILE_INLINE_THIRD_PARTY_ASSET_BYTES,
+            max_inline_bytes,
             parsed.extension_folder,
             parsed.relative_path_display
         );
         return response::error(
             StatusCode::PAYLOAD_TOO_LARGE,
-            "Third-party asset is too large to load on mobile.",
+            "Third-party asset is too large to load.",
         );
     }
 

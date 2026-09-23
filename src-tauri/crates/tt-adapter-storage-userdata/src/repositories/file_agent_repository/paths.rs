@@ -9,6 +9,9 @@ use tt_domain::errors::DomainError;
 use tt_domain::models::agent::{AgentRun, WorkspacePath};
 use tt_ports::repositories::agent_run_repository::AgentRunRepository;
 
+/// Where a chat's published persistent versions live, one directory each.
+pub(super) const PERSISTENT_STATES_DIR: &str = "persistent-states";
+
 impl FileAgentRepository {
     pub(super) fn index_run_path(&self, run_id: &str) -> Result<PathBuf, DomainError> {
         validate_segment(run_id, "run_id")?;
@@ -55,7 +58,7 @@ impl FileAgentRepository {
             .root
             .join("chats")
             .join(workspace_id)
-            .join("persistent-states")
+            .join(PERSISTENT_STATES_DIR)
             .join(state_id))
     }
 

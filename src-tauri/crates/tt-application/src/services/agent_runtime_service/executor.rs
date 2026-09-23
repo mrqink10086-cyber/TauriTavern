@@ -12,6 +12,7 @@ use super::loop_runner::AgentLoopExit;
 use super::prompt_snapshot::{
     frozen_macros_from_snapshot, prepare_agent_tool_request, request_summary,
 };
+use super::state_machine::StateMachineAdvance;
 use super::tool_snapshot::tool_snapshot_summary;
 use super::{AgentCancelReceiver, AgentRuntimeService, PreparedInvocation};
 use crate::dto::chat_completion_dto::ChatCompletionGenerateRequestDto;
@@ -87,16 +88,65 @@ impl AgentRuntimeService {
         {
             tracing::error!(target: tt_contracts::observability::USER_VISIBLE_ERROR,
                 "Agent run {run_id} could not save its final execution state: {error}");
-            let handle = self.active_runs.read().await.get(run_id).cloned();
-            let has_pending = if let Some(handle) = handle {
-                handle.pending_checkpoint.lock().await.is_some()
-            } else {
-                false
-            };
-            if !has_pending {
-                self.active_runs.write().await.remove(run_id);
+            self.abandon_run_after_finalize_failure(run_id, &error).await;
+        }
+    }
+
+    /// Release a run whose terminal state could not be saved.
+    ///
+    /// Every failure path out of `finalize_agent_loop_run_result` has already
+    /// given up its pending checkpoint, so the slot is released unconditionally:
+    /// holding it would block resume, cancellation and retention for the life of
+    /// the process, and leak the scheduler, mailbox and live projection with it.
+    /// The run is marked failed first, on a best-effort basis, so it is at least
+    /// listed instead of sitting in a non-terminal state the history omits.
+    async fn abandon_run_after_finalize_failure(&self, run_id: &str, error: &ApplicationError) {
+        if let Ok(mut run) = self.run_repository.load_run(run_id).await {
+            run.status = AgentRunStatus::Failed;
+            run.updated_at = chrono::Utc::now();
+            if let Err(save_error) = self.run_repository.save_run(&run).await {
+                tracing::error!(target: tt_contracts::observability::USER_VISIBLE_ERROR,
+                    "Agent run {run_id} could not be marked failed either: {save_error}");
             }
         }
+        if let Err(event_error) = self
+            .event(
+                run_id,
+                AgentRunEventLevel::Error,
+                "run_finalize_failed",
+                json!({ "message": error.to_string() }),
+            )
+            .await
+        {
+            tracing::error!(target: tt_contracts::observability::USER_VISIBLE_ERROR,
+                "Agent run {run_id} could not record its finalize failure: {event_error}");
+        }
+        self.active_runs.write().await.remove(run_id);
+    }
+
+    /// Persist the checkpoint, retrying a bounded number of times.
+    ///
+    /// This write is the last thing between a finished run and a state it can be
+    /// resumed from, and the caller needs a definite answer because it decides
+    /// whether the run's slot is released.
+    async fn persist_checkpoint_with_retries(
+        &self,
+        checkpoint: &super::checkpoint::RunCheckpoint,
+    ) -> Result<(), ApplicationError> {
+        const ATTEMPTS: usize = 3;
+        let mut last_error = None;
+        for attempt in 0..ATTEMPTS {
+            match self.persist_checkpoint(checkpoint).await {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    last_error = Some(error);
+                    if attempt + 1 < ATTEMPTS {
+                        tokio::task::yield_now().await;
+                    }
+                }
+            }
+        }
+        Err(last_error.expect("a failed attempt records its error"))
     }
 
     pub(super) async fn finalize_agent_loop_run_result(
@@ -188,10 +238,14 @@ impl AgentRuntimeService {
             presentation,
         ));
         if !handle.host_presentation {
-            self.persist_checkpoint(pending.as_ref().expect("checkpoint was captured"))
-                .await?;
+            let checkpoint = pending.as_ref().expect("checkpoint was captured");
+            let persisted = self.persist_checkpoint_with_retries(checkpoint).await;
+            // Release the slot either way: without a saved checkpoint the run
+            // cannot be resumed, so keeping it here would only block the run from
+            // ever being cleaned up.
             pending.take();
             self.active_runs.write().await.remove(run_id);
+            persisted?;
         }
         Ok(())
     }
@@ -406,6 +460,16 @@ impl AgentRuntimeService {
                             .stop_and_join()
                             .await?,
                     );
+                    // The machine advances on the state this run produced, before
+                    // publication, so the new position and the values it moved
+                    // are published together with the floor that caused them.
+                    // Once per run: a resumed run re-enters this branch, and a
+                    // rule with a side effect must not fire twice.
+                    if !state.state_machine_advanced {
+                        let advance = self.advance_state_machine_before_commit(run_id).await?;
+                        state.state_machine_advanced =
+                            !matches!(advance, StateMachineAdvance::Failed);
+                    }
                     self.finish_run(
                         run_id,
                         frame.prepared.delegation_task_id.as_deref(),

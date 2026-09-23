@@ -148,6 +148,7 @@ async fn success_builds_result_and_passes_workspace_context() {
             "worldInfo": { "entries": [] },
             "variables": { "local": {}, "global": {} },
             "macro": {},
+            "state": {},
         })
     );
 
@@ -271,14 +272,21 @@ async fn frozen_host_context_is_passed_to_engine() {
                 "local": { "score": 42, "name": "Alice" },
                 "global": { "theme": "dark" }
             },
-            "macro": macro_context
+            "macro": macro_context,
+            // A chat with no declaration has no state, and that reads as empty
+            // rather than failing the call.
+            "state": {},
         })
     );
 }
 
 #[test]
 fn malformed_script_context_fails_fast() {
-    assert!(build_script_context_json(&json!({ "worldInfoActivation": {} })).is_err());
+    assert!(build_script_context_json(
+        &json!({ "worldInfoActivation": {} }),
+        &std::collections::BTreeMap::new(),
+    )
+    .is_err());
     for (frozen, message) in [
         (
             json!({ "variables": { "local": [], "global": {} } }),
@@ -293,7 +301,7 @@ fn malformed_script_context_fails_fast() {
         let error = build_script_context_json(&json!({
             "worldInfoActivation": { "entries": [] },
             "frozenRunInputSnapshot": frozen,
-        }))
+        }), &std::collections::BTreeMap::new())
         .unwrap_err();
         assert!(matches!(error, ApplicationError::ValidationError(_)));
         assert!(

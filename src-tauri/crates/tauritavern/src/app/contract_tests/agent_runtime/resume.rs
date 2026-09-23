@@ -20,6 +20,7 @@ async fn agent_runtime_checkpoint_publishes_terminal_state_after_host_presentati
             ..Default::default()
         },
         None,
+        None,
     )
     .await;
     let terminal_seq = tokio::time::timeout(AGENT_CONTRACT_ASYNC_TIMEOUT, async {
@@ -457,7 +458,14 @@ async fn agent_runtime_resume_keeps_partial_turn_cursor_after_confirmed_tool() {
         .mcp_gateway
         .wait_for_cancel
         .store(true, Ordering::SeqCst);
-    let (profile, _) = super::mcp::configure_mcp_profile(&fixture, "resume-mcp", 1, 10_000).await;
+    let (profile, _) = super::mcp::configure_mcp_profile(
+        &fixture,
+        "resume-mcp",
+        1,
+        10_000,
+        tt_domain::models::mcp::McpToolPermission::Allow,
+    )
+    .await;
     let handle = start_contract_agent_run(
         &fixture,
         &profile,
@@ -624,6 +632,7 @@ async fn agent_runtime_resume_preserves_cancelled_child_progress() {
                 ..Default::default()
             },
             frozen_input,
+            None,
         )
         .await;
         if during_preparation {
@@ -1076,6 +1085,123 @@ async fn resume_checkpoint(
         .expect("resume saved execution");
     assert_eq!(handle.run_id, run.id);
     assert_eq!(handle.after_seq, Some(checkpoint.terminal_seq));
+}
+
+/// A machine with one unconditional move, so advancing it is visible in how
+/// often the journal records the advance.
+fn contract_state_machine() -> Value {
+    json!({
+        "initial": ["day"],
+        "states": [
+            { "id": "day" },
+            { "id": "night" },
+        ],
+        "transitions": [{
+            "id": "nightfall",
+            "from": ["day"],
+            "to": ["night"],
+        }],
+    })
+}
+
+#[tokio::test]
+async fn agent_runtime_resume_does_not_advance_the_state_machine_twice() {
+    let root = temp_root("agent-resume-machine-advance");
+    let fixture = agent_runtime_fixture_with_responses(
+        &root,
+        vec![model_tool_response(vec![
+            model_tool_call(
+                "write",
+                "workspace_write_file",
+                json!({ "path": "output/main.md", "content": "keep this reply" }),
+            ),
+            model_tool_call(
+                "commit",
+                "workspace_commit",
+                json!({ "path": "output/main.md" }),
+            ),
+            model_tool_call("finish", "workspace_finish", json!({})),
+        ])],
+    );
+    let profile = resolve_contract_profile(&fixture).await;
+    let handle = start_contract_agent_run_with_options(
+        &fixture,
+        &profile,
+        "machine-advance",
+        AgentStartRunOptionsDto {
+            presentation: Some(AgentRunPresentation::Foreground),
+            stream: Some(false),
+            ..Default::default()
+        },
+        None,
+        Some(json!({ "stateMachine": contract_state_machine() })),
+    )
+    .await;
+
+    // The machine advances before publication, so it has already moved by the
+    // time the host refuses the metadata update and the run stops at `finalize`.
+    let commit = wait_for_event(&fixture, &handle.run_id, "chat_commit_requested", 0).await;
+    fixture
+        .service
+        .resolve_chat_commit(AgentResolveChatCommitDto {
+            run_id: handle.run_id.clone(),
+            commit_id: commit.payload["commitId"].as_str().unwrap().to_string(),
+            message_id: Some("0".to_string()),
+            error: None,
+        })
+        .await
+        .unwrap();
+    let update = wait_for_event(
+        &fixture,
+        &handle.run_id,
+        "persistent_state_metadata_update_requested",
+        0,
+    )
+    .await;
+    fixture
+        .service
+        .resolve_persistent_state_metadata_update(AgentResolvePersistentStateMetadataUpdateDto {
+            run_id: handle.run_id.clone(),
+            update_id: update.payload["updateId"].as_str().unwrap().to_string(),
+            error: Some("chat temporarily unavailable".to_string()),
+        })
+        .await
+        .unwrap();
+    let stopped = wait_for_checkpoint(&fixture, &handle.run_id).await;
+    assert_eq!(stopped.next_step, "finalize");
+    drop(fixture);
+
+    let fixture = agent_runtime_fixture_with_responses(&root, Vec::new());
+    resume_checkpoint(&fixture, &stopped, 0).await;
+    let retried = wait_for_event(
+        &fixture,
+        &handle.run_id,
+        "persistent_state_metadata_update_requested",
+        stopped.terminal_seq,
+    )
+    .await;
+    fixture
+        .service
+        .resolve_persistent_state_metadata_update(AgentResolvePersistentStateMetadataUpdateDto {
+            run_id: handle.run_id.clone(),
+            update_id: retried.payload["updateId"].as_str().unwrap().to_string(),
+            error: None,
+        })
+        .await
+        .unwrap();
+    let completed = wait_for_checkpoint(&fixture, &handle.run_id).await;
+    assert_eq!(completed.run.status, AgentRunStatus::Completed);
+
+    let events = read_agent_events(&fixture.agent_repository, &handle.run_id).await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == "state_machine_advanced")
+            .count(),
+        1,
+        "a resumed run must not apply this floor's rules a second time"
+    );
+    fs::remove_dir_all(root).await.unwrap();
 }
 
 async fn read_output(fixture: &AgentRuntimeFixture, run_id: &str) -> String {

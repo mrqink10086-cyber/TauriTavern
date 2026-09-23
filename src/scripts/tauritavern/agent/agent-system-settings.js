@@ -8,6 +8,7 @@
  *   editingProfileId: string;
  *   activeTab: string;
  *   runTimelineHeightPx: number | null;
+ *   defaultSceneSeedVersion?: number;
  * }} AgentSystemSettings
  */
 
@@ -23,6 +24,9 @@ const DEFAULT_AGENT_SYSTEM_SETTINGS = Object.freeze({
     editingProfileId: DEFAULT_AGENT_PROFILE_ID,
     activeTab: 'profiles',
     runTimelineHeightPx: null,
+    // Which shipped-content pass has already run. Bumped when a new pass is
+    // added, so an install that already ran one still gets the next.
+    defaultSceneSeedVersion: 0,
 });
 
 function requireExtensionStore() {

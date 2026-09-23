@@ -7,7 +7,9 @@ publish = false
 [dependencies]
 chrono = { workspace = true }
 rand = { workspace = true }
+regex = { workspace = true }
 serde = { workspace = true }
+sha2 = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 ttsync-contract = { workspace = true }

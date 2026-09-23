@@ -10,6 +10,15 @@ let lastActivation = null;
 let installed = false;
 
 /**
+ * How much of an entry's text the panel is shown.
+ *
+ * A list of entries an Agent may or may not read has to say what each one is; it
+ * does not have to carry the whole entry for that. The rule a reader sets names
+ * the entry by book and id, so the text here is for deciding, not for storing.
+ */
+const ENTRY_PREVIEW_CHARS = 240;
+
+/**
  * @param {unknown} position
  */
 function normalizePosition(position) {
@@ -65,6 +74,7 @@ function normalizeEntry(entry) {
         displayName: normalizeDisplayName(entry),
         constant: Boolean(entry?.constant),
         ...(position ? { position } : {}),
+        contentPreview: String(entry?.content ?? '').trim().slice(0, ENTRY_PREVIEW_CHARS),
     };
 }
 

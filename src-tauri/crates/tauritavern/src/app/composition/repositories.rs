@@ -17,14 +17,16 @@ use tt_adapter_media::{
 };
 use tt_adapter_provider_http::{
     HttpChatCompletionRepository, HttpEmbeddingRepository, HttpProviderMetadataRepository,
-    HttpSearxngSearchRepository, HttpStableDiffusionRepository, HttpTranslateRepository,
-    HttpTtsRepository,
+    HttpQdrantRepository, HttpSearxngSearchRepository, HttpStableDiffusionRepository,
+    HttpTranslateRepository, HttpTtsRepository,
 };
 use tt_adapter_storage_core::{
     DataDirectory, FileAssetRepository, FileChatRepository, FileExtensionStoreRepository,
     FileGroupRepository, FileLlmConnectionRepository, FileMcpServerRepository,
     FilePromptCacheRepository, FileQuickReplyRepository, FileSecretRepository,
-    FileSettingsRepository, FileThemeRepository, FileUserDirectoryRepository,
+    FileSettingsRepository, FileStateDeclarationRepository, FileStateMachineRepository,
+    FileStatePredicateRepository, FileThemeRepository,
+    FileUserDirectoryRepository,
     FileUserEndpointGrantRepository, FileUserRepository,
     chat_directory_identity::new_shared_chat_alias_store_for_user_dir,
 };
@@ -60,10 +62,14 @@ use tt_ports::repositories::mcp_server_repository::McpServerRepository;
 use tt_ports::repositories::preset_repository::PresetRepository;
 use tt_ports::repositories::prompt_cache_repository::PromptCacheRepository;
 use tt_ports::repositories::provider_metadata_repository::ProviderMetadataRepository;
+use tt_ports::repositories::qdrant_repository::QdrantRepository;
 use tt_ports::repositories::quick_reply_repository::QuickReplyRepository;
 use tt_ports::repositories::searxng_search_repository::SearxngSearchRepository;
 use tt_ports::repositories::secret_repository::SecretRepository;
 use tt_ports::repositories::settings_repository::SettingsRepository;
+use tt_ports::repositories::state_declaration_repository::StateDeclarationRepository;
+use tt_ports::repositories::state_machine_repository::StateMachineRepository;
+use tt_ports::repositories::state_predicate_repository::StatePredicateRepository;
 use tt_ports::repositories::skill_repository::SkillRepository;
 use tt_ports::repositories::sprite_repository::SpriteRepository;
 use tt_ports::repositories::stable_diffusion_repository::StableDiffusionRepository;
@@ -75,6 +81,7 @@ use tt_ports::repositories::update_repository::UpdateRepository;
 use tt_ports::repositories::user_directory_repository::UserDirectoryRepository;
 use tt_ports::repositories::user_endpoint_grant_repository::UserEndpointGrantRepository;
 use tt_ports::repositories::user_repository::UserRepository;
+use tt_ports::repositories::recall_repository::RecallRepository;
 use tt_ports::repositories::vector_repository::{
     LocalEmbeddingRepository, RemoteEmbeddingRepository, VectorRepository,
 };
@@ -105,6 +112,9 @@ pub(in crate::app::composition) struct AppRepositories {
     pub(in crate::app::composition) background_repository: Arc<dyn BackgroundRepository>,
     pub(in crate::app::composition) image_metadata_repository: Arc<dyn ImageMetadataRepository>,
     pub(in crate::app::composition) theme_repository: Arc<dyn ThemeRepository>,
+    pub(in crate::app::composition) state_declaration_repository: Arc<dyn StateDeclarationRepository>,
+    pub(in crate::app::composition) state_machine_repository: Arc<dyn StateMachineRepository>,
+    pub(in crate::app::composition) state_predicate_repository: Arc<dyn StatePredicateRepository>,
     pub(in crate::app::composition) preset_repository: Arc<dyn PresetRepository>,
     pub(in crate::app::composition) quick_reply_repository: Arc<dyn QuickReplyRepository>,
     pub(in crate::app::composition) agent_profile_repository: Arc<dyn AgentProfileRepository>,
@@ -130,8 +140,10 @@ pub(in crate::app::composition) struct AppRepositories {
     pub(in crate::app::composition) world_info_repository: Arc<dyn WorldInfoRepository>,
     pub(in crate::app::composition) update_repository: Arc<dyn UpdateRepository>,
     pub(in crate::app::composition) vector_repository: Arc<dyn VectorRepository>,
+    pub(in crate::app::composition) recall_repository: Arc<dyn RecallRepository>,
     pub(in crate::app::composition) remote_embedding_repository: Arc<dyn RemoteEmbeddingRepository>,
     pub(in crate::app::composition) local_embedding_repository: Arc<dyn LocalEmbeddingRepository>,
+    pub(in crate::app::composition) qdrant_repository: Arc<dyn QdrantRepository>,
 }
 
 pub(super) async fn build(
@@ -261,6 +273,15 @@ pub(super) async fn build(
 
     let theme_repository: Arc<dyn ThemeRepository> =
         Arc::new(FileThemeRepository::new(default_user_dir.join("themes")));
+    let state_declaration_repository: Arc<dyn StateDeclarationRepository> = Arc::new(
+        FileStateDeclarationRepository::new(default_user_dir.join("state-declarations")),
+    );
+    let state_machine_repository: Arc<dyn StateMachineRepository> = Arc::new(
+        FileStateMachineRepository::new(default_user_dir.join("state-machines")),
+    );
+    let state_predicate_repository: Arc<dyn StatePredicateRepository> = Arc::new(
+        FileStatePredicateRepository::new(default_user_dir.join("state-predicates")),
+    );
 
     let preset_repository: Arc<dyn PresetRepository> = Arc::new(FilePresetRepository::new(
         app_handle.clone(),
@@ -338,10 +359,20 @@ pub(super) async fn build(
     let update_repository: Arc<dyn UpdateRepository> =
         Arc::new(GitHubUpdateRepository::new(http_client_pool.clone()));
 
+    // The Similharity bridge speaks to a user-supplied Qdrant instance; the host
+    // stores nothing locally for it, so this is a pure outbound HTTP port.
+    let qdrant_repository: Arc<dyn QdrantRepository> =
+        Arc::new(HttpQdrantRepository::new(http_client_pool.clone()));
+
     let vector_root = default_user_dir.join("vectors");
-    let vector_repository: Arc<dyn VectorRepository> = Arc::new(RedbVectorRepository::new(
+    // One redb file behind two ports: recall adds scope metadata and floor
+    // binding to the same index. redb holds an exclusive lock on the file, so a
+    // second handle over this path would refuse to open at all.
+    let redb_vector_repository = Arc::new(RedbVectorRepository::new(
         vector_root.join("tauritavern-v1.redb"),
     ));
+    let vector_repository: Arc<dyn VectorRepository> = redb_vector_repository.clone();
+    let recall_repository: Arc<dyn RecallRepository> = redb_vector_repository;
     let remote_embedding_repository: Arc<dyn RemoteEmbeddingRepository> =
         Arc::new(HttpEmbeddingRepository::new(http_client_pool));
     let local_embedding_repository: Arc<dyn LocalEmbeddingRepository> = Arc::new(
@@ -361,6 +392,7 @@ pub(super) async fn build(
         secret_repository,
         skill_repository,
         sprite_repository,
+        state_predicate_repository,
         content_repository,
         asset_repository,
         extension_repository,
@@ -370,6 +402,8 @@ pub(super) async fn build(
         background_repository,
         image_metadata_repository,
         theme_repository,
+        state_declaration_repository,
+        state_machine_repository,
         preset_repository,
         quick_reply_repository,
         agent_profile_repository,
@@ -391,7 +425,9 @@ pub(super) async fn build(
         world_info_repository,
         update_repository,
         vector_repository,
+        recall_repository,
         remote_embedding_repository,
         local_embedding_repository,
+        qdrant_repository,
     })
 }

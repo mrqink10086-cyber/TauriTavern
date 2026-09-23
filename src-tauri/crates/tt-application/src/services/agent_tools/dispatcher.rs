@@ -7,10 +7,12 @@ use super::chat;
 use super::dice;
 use super::session::AgentToolSession;
 use super::skill;
+use super::state;
 use super::workspace;
 use super::world_info;
 use crate::errors::ApplicationError;
 use crate::services::skill_service::SkillService;
+use crate::services::state_runtime::read_run_prompt_snapshot as read_frozen_run_input;
 use tt_domain::models::agent::profile::ResolvedAgentProfile;
 use tt_domain::models::agent::{
     AgentChatCommitMode, AgentToolResult, WorkspaceFileWriteMode, WorkspacePath,
@@ -19,10 +21,9 @@ use tt_domain::models::tool::{ToolId, ToolInvocation};
 use tt_ports::repositories::agent_run_repository::AgentRunRepository;
 use tt_ports::repositories::chat_repository::ChatRepository;
 use tt_ports::repositories::group_chat_repository::GroupChatRepository;
+use tt_ports::repositories::tokenizer_repository::TokenizerRepository;
 use tt_ports::repositories::workspace_repository::{WorkspaceFile, WorkspaceRepository};
 use tt_ports::skill_script::SkillScriptEngine;
-
-const RUN_PROMPT_SNAPSHOT_PATH: &str = "input/prompt_snapshot.json";
 
 #[derive(Debug, Clone)]
 pub(crate) struct AgentToolDispatchOutcome {
@@ -73,6 +74,12 @@ pub(crate) struct AgentToolDispatcher {
     workspace_repository: Arc<dyn WorkspaceRepository>,
     skill_service: Arc<SkillService>,
     skill_script_engine: Arc<dyn SkillScriptEngine>,
+    /// The vocabulary a scene counts its values with, shared with the runtime.
+    ///
+    /// A tool writes state, and a scene may ask for its ceilings to be counted
+    /// in tokens; the cell is the same one the completion pass reads, so both
+    /// count the same value the same way.
+    state_tokenizer: Arc<std::sync::OnceLock<Arc<dyn TokenizerRepository>>>,
 }
 
 impl AgentToolDispatcher {
@@ -83,6 +90,7 @@ impl AgentToolDispatcher {
         workspace_repository: Arc<dyn WorkspaceRepository>,
         skill_service: Arc<SkillService>,
         skill_script_engine: Arc<dyn SkillScriptEngine>,
+        state_tokenizer: Arc<std::sync::OnceLock<Arc<dyn TokenizerRepository>>>,
     ) -> Self {
         Self {
             run_repository,
@@ -91,6 +99,7 @@ impl AgentToolDispatcher {
             workspace_repository,
             skill_service,
             skill_script_engine,
+            state_tokenizer,
         }
     }
 
@@ -153,6 +162,35 @@ impl AgentToolDispatcher {
                 // workspace file; invocation workspace policy must not gate this read.
                 let prompt_snapshot = self.read_run_prompt_snapshot(run_id).await?;
                 world_info::read_activated(&prompt_snapshot, call, args)?
+            }
+            state::STATE_UPDATE => {
+                // The declaration travels with the run input, exactly like the
+                // rest of the frozen run facts.
+                let prompt_snapshot = self.read_run_prompt_snapshot(run_id).await?;
+                state::update(
+                    model_workspace_repository,
+                    run_id,
+                    &prompt_snapshot,
+                    self.state_tokenizer.get(),
+                    call,
+                    args,
+                )
+                .await?
+            }
+            state::STATE_TRANSITION => {
+                // The bound machine travels with the run input too: the move is
+                // resolved against the same frozen spec the rest of the run sees.
+                let prompt_snapshot = self.read_run_prompt_snapshot(run_id).await?;
+                state::transition(
+                    model_workspace_repository,
+                    Some(self.skill_script_engine.as_ref()),
+                    run_id,
+                    &prompt_snapshot,
+                    self.state_tokenizer.get(),
+                    call,
+                    args,
+                )
+                .await?
             }
             dice::DICE_ROLL => dice::roll(call, args).await?,
             skill::SKILL_LIST => skill::list(call, session, profile).await?,
@@ -219,17 +257,7 @@ impl AgentToolDispatcher {
         &self,
         run_id: &str,
     ) -> Result<serde_json::Value, ApplicationError> {
-        let snapshot_path = WorkspacePath::parse(RUN_PROMPT_SNAPSHOT_PATH)?;
-        let snapshot_file = self
-            .workspace_repository
-            .read_text(run_id, &snapshot_path)
-            .await
-            .map_err(ApplicationError::from)?;
-        serde_json::from_str(&snapshot_file.text).map_err(|error| {
-            ApplicationError::ValidationError(format!(
-                "agent.invalid_prompt_snapshot_file: failed to parse prompt snapshot JSON: {error}"
-            ))
-        })
+        read_frozen_run_input(self.workspace_repository.as_ref(), run_id).await
     }
 }
 

@@ -12,9 +12,12 @@ use tt_ports::repositories::vector_repository::{
     VectorMatch, VectorRecord, VectorRepository, VectorScope,
 };
 
-const METADATA: TableDefinition<&str, &[u8]> = TableDefinition::new("metadata_v1");
+pub(crate) const METADATA: TableDefinition<&str, &[u8]> = TableDefinition::new("metadata_v1");
 const VECTORS: TableDefinition<&str, &[u8]> = TableDefinition::new("vectors_v1");
-const SCOPES: TableDefinition<&str, u32> = TableDefinition::new("scopes_v1");
+pub(crate) const SCOPES: TableDefinition<&str, u32> = TableDefinition::new("scopes_v1");
+/// What each recall index says about itself. Same file and same scope prefixes
+/// as the tables above, so one scope has exactly one dimension record.
+pub(crate) const SCOPE_META: TableDefinition<&str, &[u8]> = TableDefinition::new("scope_meta_v1");
 
 pub struct RedbVectorRepository {
     database_path: PathBuf,
@@ -29,7 +32,7 @@ impl RedbVectorRepository {
         }
     }
 
-    async fn database(&self) -> Result<Arc<Database>, DomainError> {
+    pub(crate) async fn database(&self) -> Result<Arc<Database>, DomainError> {
         let database_path = self.database_path.clone();
         self.database
             .get_or_try_init(|| async move {
@@ -55,6 +58,9 @@ impl RedbVectorRepository {
                         transaction
                             .open_table(SCOPES)
                             .map_err(|error| storage_error("initialize scope table", error))?;
+                        transaction
+                            .open_table(SCOPE_META)
+                            .map_err(|error| storage_error("initialize scope metadata table", error))?;
                     }
                     transaction
                         .commit()
@@ -72,7 +78,7 @@ impl RedbVectorRepository {
             .cloned()
     }
 
-    async fn run_blocking<T, F>(&self, operation: F) -> Result<T, DomainError>
+    pub(crate) async fn run_blocking<T, F>(&self, operation: F) -> Result<T, DomainError>
     where
         T: Send + 'static,
         F: FnOnce(Arc<Database>) -> Result<T, DomainError> + Send + 'static,
@@ -425,7 +431,7 @@ fn collection_prefix(collection_id: &str) -> String {
     format!("c/{}/", sha256_hex(collection_id.as_bytes()))
 }
 
-fn scope_prefix(scope: &VectorScope) -> String {
+pub(crate) fn scope_prefix(scope: &VectorScope) -> String {
     let mut identity = Sha256::new();
     identity.update((scope.source.len() as u64).to_le_bytes());
     identity.update(scope.source.as_bytes());
@@ -446,7 +452,7 @@ fn item_id(record: &VectorRecord) -> String {
     hex_digest(identity.finalize())
 }
 
-fn prefix_end(prefix: &str) -> String {
+pub(crate) fn prefix_end(prefix: &str) -> String {
     format!("{prefix}~")
 }
 
@@ -487,7 +493,7 @@ fn decode_embedding(bytes: &[u8]) -> Result<Vec<f32>, DomainError> {
     Ok(embedding)
 }
 
-fn storage_error(action: &str, error: impl std::fmt::Display) -> DomainError {
+pub(crate) fn storage_error(action: &str, error: impl std::fmt::Display) -> DomainError {
     DomainError::InternalError(format!("Failed to {action}: {error}"))
 }
 
@@ -520,6 +526,9 @@ mod tests {
                 hash,
                 text: text.to_string(),
                 index: 0,
+                floor: None,
+                field_key: None,
+                kind: None,
             },
             embedding,
         }

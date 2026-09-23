@@ -6,3 +6,4 @@ pub mod models;
 pub mod text_lines;
 pub mod text_metrics;
 pub mod text_search;
+pub mod transcript;

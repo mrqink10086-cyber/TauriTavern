@@ -32,6 +32,7 @@ export const KNOWN_TOOLS = Object.freeze([
     'builtin:skill.search',
     'builtin:skill.read',
     'builtin:skill.run_script',
+    'builtin:state.update',
     'builtin:workspace.list_files',
     'builtin:workspace.search_files',
     'builtin:workspace.read_file',
@@ -41,4 +42,4 @@ export const KNOWN_TOOLS = Object.freeze([
     'builtin:workspace.finish',
 ]);
 
-export const WORKSPACE_ROOTS = Object.freeze(['output', 'scratch', 'plan', 'summaries', 'persist']);
+export const WORKSPACE_ROOTS = Object.freeze(['output', 'scratch', 'plan', 'summaries', 'persist', 'state']);

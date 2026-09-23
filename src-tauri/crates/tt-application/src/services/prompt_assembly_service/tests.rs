@@ -4,6 +4,9 @@ use serde_json::json;
 
 use super::*;
 use crate::services::llm_connection_service::ResolvedLlmSecretRef;
+use tt_domain::models::state_access::{StateAccessEntry, StateAccessPolicy};
+use tt_domain::models::state_injection::StateInjectionSlot;
+use tt_domain::models::state_key::StateKeyPattern;
 
 fn model_binding(
     source: &str,
@@ -24,6 +27,41 @@ fn model_binding(
             label_snapshot: None,
         }),
     }
+}
+
+#[test]
+fn the_run_input_carries_the_profiles_state_access() {
+    let policy = StateAccessPolicy {
+        entries: vec![StateAccessEntry {
+            pattern: StateKeyPattern::parse("角色/*/着装").expect("pattern"),
+            inject: true,
+            visible: false,
+            writable: true,
+            inject_slot: StateInjectionSlot::AtDepth,
+            inject_depth: 6,
+        }],
+    };
+
+    let snapshot = attach_state_access_policy(json!({ "chatCompletionPayload": {} }), &policy)
+        .expect("attaching access must succeed");
+    let attached = &snapshot[ACCESS_SNAPSHOT_KEY];
+
+    assert_eq!(attached["entries"][0]["pattern"], json!("角色/*/着装"));
+    assert_eq!(attached["entries"][0]["inject"], json!(true));
+    assert_eq!(attached["entries"][0]["visible"], json!(false));
+    assert_eq!(attached["entries"][0]["writable"], json!(true));
+
+    let read_back: StateAccessPolicy =
+        serde_json::from_value(attached.clone()).expect("the wire shape must read back");
+    assert_eq!(read_back, policy, "the tool reads this exact shape back");
+
+    let empty = attach_state_access_policy(json!({}), &StateAccessPolicy::default())
+        .expect("attaching an empty policy must succeed");
+    assert_eq!(
+        empty[ACCESS_SNAPSHOT_KEY],
+        json!({ "entries": [] }),
+        "an unconfigured policy is recorded as such rather than omitted"
+    );
 }
 
 #[test]

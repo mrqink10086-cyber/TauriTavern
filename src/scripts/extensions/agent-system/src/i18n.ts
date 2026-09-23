@@ -1,9 +1,15 @@
 import { DEFAULT_MESSAGES as DEFAULT_AGENT_MESSAGES } from './i18n-default-messages';
+import { RECALL_MESSAGES } from './i18n-recall-messages';
+import { STATE_MESSAGES } from './i18n-state-messages';
 import { TIMELINE_MESSAGES } from './i18n-timeline-messages';
+import { WORLD_INFO_MESSAGES } from './i18n-world-info-messages';
 
 const PREFIX = 'agent_system.';
 const DEFAULT_MESSAGES = Object.freeze({
     ...DEFAULT_AGENT_MESSAGES,
+    ...STATE_MESSAGES,
+    ...RECALL_MESSAGES,
+    ...WORLD_INFO_MESSAGES,
     ...TIMELINE_MESSAGES,
 });
 

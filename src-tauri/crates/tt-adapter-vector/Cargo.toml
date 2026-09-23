@@ -19,4 +19,5 @@ tt-domain = { path = "../tt-domain" }
 tt-ports = { path = "../tt-ports" }
 
 [dev-dependencies]
+chrono = { workspace = true }
 uuid = { workspace = true }

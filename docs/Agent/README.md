@@ -61,7 +61,11 @@ Agent 间的交互可以理解为管道：调用方送出任务包，接收方�
 
 | 要做的事 | 文档 |
 | --- | --- |
+| 一页看懂状态系统是什么、怎么配置、有哪些红线 | [状态系统](StateOverview.md) |
 | 理解文件、聊天提交与跨运行状态 | [Workspace](Workspace.md) |
+| 设计状态栏与状态存储 | [状态](State.md) |
+| 搭建状态机与脚本扩展 | [状态机](StateMachine.md) |
+| 状态的注入、按 Agent 可见性与准入 | [状态注入与可见性](StateInjection.md) |
 | 修改启动、循环和收尾流程 | [运行循环](Runtime.md) |
 | 读取历史、实现 Timeline | [运行日志](RunEventJournal.md) |
 | 配置 Agent、独立模型与预设 | [Profile 与预设](ProfilesAndPreset.md) |

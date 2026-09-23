@@ -1309,7 +1309,8 @@ async function onRegexDebuggerOpenClick() {
                 }
 
                 if (result.error) {
-                    stepHeader.append($(`<div class='warning_text text_rose-500'>${result.error}</div>`));
+                    // Compile errors echo the regex source, so treat them as text.
+                    stepHeader.append($(`<div class='warning_text text_rose-500'>${escapeHtml(result.error)}</div>`));
                 }
 
                 stepsOutput.append(stepElement);

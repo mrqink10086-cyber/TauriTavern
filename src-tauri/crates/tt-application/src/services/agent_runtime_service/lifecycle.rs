@@ -24,10 +24,14 @@ use crate::services::agent_profile_service::{
     AgentProfileResolveInput, ensure_profile_model_configured,
 };
 use crate::services::agent_workspace_lifecycle_service::AgentRunActivity;
-use crate::services::prompt_assembly_service::attach_frozen_run_input_snapshot;
+use crate::services::prompt_assembly_service::{
+    attach_frozen_run_input_snapshot, attach_recall_policy, attach_state_access_policy,
+};
 use tt_domain::models::agent::{AgentRun, AgentRunEventLevel, AgentRunStatus, WorkspacePath};
 use tt_domain::text_metrics::TextMetrics;
 use tt_ports::repositories::agent_run_repository::AgentRunEventReadQuery;
+
+use super::recall::{recall_block_texts, strip_recall_blocks};
 
 impl AgentRuntimeService {
     pub async fn start_run(
@@ -42,7 +46,7 @@ impl AgentRuntimeService {
                     .to_string(),
             ));
         };
-        let request = request_from_prompt_snapshot(&prompt_snapshot)?;
+        let mut request = request_from_prompt_snapshot(&prompt_snapshot)?;
         reject_external_tool_request(&request.payload)?;
 
         let generation_type = dto.generation_type.trim().to_string();
@@ -71,6 +75,9 @@ impl AgentRuntimeService {
             prompt_snapshot,
             dto.frozen_run_input_snapshot.take(),
         )?;
+        let prompt_snapshot =
+            attach_state_access_policy(prompt_snapshot, &resolved_profile.state_access)?;
+        let prompt_snapshot = attach_recall_policy(prompt_snapshot, &resolved_profile.recall)?;
         let presentation = dto
             .options
             .presentation
@@ -191,6 +198,29 @@ impl AgentRuntimeService {
             .await?;
         }
 
+        // A Profile that does not take the chat's recall sends a prompt without
+        // it. The blocks were merged into the messages by the assembly that built
+        // this request, so dropping them is a text operation — and it is the only
+        // thing this run does about recall, because the retrieval already
+        // happened before the run input was frozen.
+        if !resolved_profile.recall.inject {
+            let blocks = recall_block_texts(&prompt_snapshot, &resolved_profile.recall);
+            if !blocks.is_empty() {
+                let (occurrences, messages) = strip_recall_blocks(&mut request.payload, &blocks);
+                self.event(
+                    &run_id,
+                    AgentRunEventLevel::Info,
+                    "recall_dropped",
+                    json!({
+                        "blocks": blocks.len(),
+                        "occurrences": occurrences,
+                        "messages": messages,
+                    }),
+                )
+                .await?;
+            }
+        }
+
         let (cancel_sender, cancel_receiver) = watch::channel(false);
         let active_handle = Arc::new(super::scheduler::ActiveRunHandle::new(
             self,
@@ -287,6 +317,11 @@ impl AgentRuntimeService {
         if let Some(handle) = &active_handle
             && let Some(checkpoint) = handle.pending_checkpoint.lock().await.as_ref()
         {
+            // Already terminal, and only the host's presentation acknowledgement
+            // is outstanding: the checkpoint's own status is what the run ends
+            // as, so it is returned rather than cancelling a finished run. The
+            // finalize path must not be called from here — this holds the
+            // lifecycle lock, which is not reentrant.
             return Ok(checkpoint.handle());
         }
 

@@ -6,7 +6,11 @@ import {
     type AgentProfileDraft,
     type AgentProfileDraftNumber,
 } from './profile-model';
+import { recallControls, type RecallField } from './profile-recall';
+import { worldInfoControls } from './profile-context-world-info';
 import {
+    applyAddStateAccessRow,
+    applyAddStateAccessRows,
     applyCallableAsHandoffTarget,
     applyCallableAsSubAgent,
     applyCanDelegate,
@@ -15,18 +19,23 @@ import {
     applyModelTarget,
     applyPresetMode,
     applyPresetName,
+    applyRemoveStateAccessRow,
     applyResetToolDescriptionOverride,
     applyResetToolPropertyDescriptionOverride,
     applyRunPresentation,
     applyToolAllowed,
     applyToolDescriptionOverride,
     applyToolPropertyDescriptionOverride,
+    applyUpdateStateAccessRow,
     applyWorkspaceRootVisible,
     applyWorkspaceRootWritable,
     nextProfileId,
     profilePresentationMemoryKey,
     type AgentPresentationMemory,
 } from './profile-draft-ops';
+import type { StateAccessRow } from './profile-state-access';
+import type { ChatStateDeclaration } from './chat-state-declaration';
+import { splitKeyPatterns } from './state-config-model';
 import {
     isBuiltinProfile,
     type AgentSystemPanelControllerDeps,
@@ -77,7 +86,7 @@ export type AgentSystemDraftEditor = {
     ) => void;
     setPlanMode: (mode: string) => void;
     setToolsLimitField: (
-        field: 'maxRounds' | 'maxCallsPerRun' | 'mcpResultInlineCharLimit',
+        field: 'maxRounds' | 'maxCallsPerRun' | 'mcpResultInlineCharLimit' | 'unfoldedToolTurns',
         value: AgentProfileDraftNumber,
     ) => void;
     setModelRetryField: (field: 'maxRetries' | 'intervalMs', value: AgentProfileDraftNumber) => void;
@@ -87,6 +96,16 @@ export type AgentSystemDraftEditor = {
     setSkillsLimitField: (field: 'maxReadCharsPerCall' | 'maxReadCharsPerRun', value: AgentProfileDraftNumber) => void;
     setWorkspaceRootVisible: (root: string, visible: boolean) => void;
     setWorkspaceRootWritable: (root: string, writable: boolean) => void;
+    /** Add one row, or one row per key pattern in a pasted comma-separated list. */
+    addStateAccessRows: (patternsCsv?: string) => void;
+    expandStateAccessFromDeclaration: () => Promise<void>;
+    expandStateAccessFromChatDeclaration: () => Promise<void>;
+    removeStateAccessRow: (index: number) => void;
+    updateStateAccessRow: (index: number, patch: Partial<StateAccessRow>) => void;
+    setRecallField: (field: RecallField, value: boolean | string) => void;
+    setWorldInfoSubagentInherits: (inherits: boolean) => void;
+    setWorldInfoEntry: (entry: { world?: unknown; uid?: unknown }, carried: boolean) => void;
+    clearWorldInfoRules: () => void;
     setOutputArtifactField: (field: 'path' | 'kind', value: string) => void;
     selectTool: (toolId: string) => void;
     toggleToolAllowed: (toolId: string, enabled: boolean) => Promise<void>;
@@ -128,6 +147,20 @@ export function createAgentSystemDraftEditor(context: AgentSystemDraftEditorCont
 
     function isBuiltin(): boolean {
         return isBuiltinProfile(context.getSnapshot().draft);
+    }
+
+    /**
+     * Append one access row per pattern. An empty list adds one blank row, so a
+     * click on "Add Row" still produces something to edit.
+     */
+    function appendStateAccessRows(patterns: readonly string[]): void {
+        editDraft((draft) => {
+            if (patterns.length === 0) {
+                applyAddStateAccessRow(draft);
+                return;
+            }
+            applyAddStateAccessRows(draft, [...patterns]);
+        });
     }
 
     function replaceDraft(draft: AgentProfileDraft, editingProfileId: string): void {
@@ -301,6 +334,86 @@ export function createAgentSystemDraftEditor(context: AgentSystemDraftEditorCont
                 applyWorkspaceRootWritable(draft, root, writable);
             });
         },
+        addStateAccessRows(patternsCsv = '') {
+            appendStateAccessRows(splitKeyPatterns(patternsCsv));
+        },
+        async expandStateAccessFromDeclaration() {
+            if (isBuiltin()) {
+                return;
+            }
+            const choice = context.getSnapshot().stateDeclarationChoice.trim();
+            if (!choice) {
+                return;
+            }
+            const patterns: string[] = [];
+            try {
+                const declaration = await deps.loadStateDeclaration(choice);
+                const existing = new Set(
+                    (context.getSnapshot().draft.stateAccess?.entries ?? []).map((row) => row.pattern),
+                );
+                // One row per declared field key. Rows already in the grid and
+                // repeats inside the declaration are skipped, so expanding twice
+                // cannot stack duplicate rows the backend would refuse as overlaps.
+                for (const field of declaration.fields) {
+                    const pattern = String(field?.pattern ?? '').trim();
+                    if (pattern.length > 0 && !existing.has(pattern) && !patterns.includes(pattern)) {
+                        patterns.push(pattern);
+                    }
+                }
+            } catch (error) {
+                deps.notifyError(error);
+                return;
+            }
+            if (patterns.length === 0) {
+                deps.notifyWarning(deps.tr('stateAccessDeclarationEmpty'));
+                return;
+            }
+            appendStateAccessRows(patterns);
+        },
+        async expandStateAccessFromChatDeclaration() {
+            if (isBuiltin()) {
+                return;
+            }
+            let resolved: ChatStateDeclaration | null = null;
+            try {
+                resolved = await deps.resolveChatStateDeclaration();
+            } catch (error) {
+                deps.notifyError(error);
+                return;
+            }
+            if (!resolved) {
+                deps.notifyWarning(deps.tr('stateAccessChatDeclarationMissing'));
+                return;
+            }
+            const existing = new Set(
+                (context.getSnapshot().draft.stateAccess?.entries ?? []).map((row) => row.pattern),
+            );
+            const patterns: string[] = [];
+            for (const field of resolved.fields) {
+                const pattern = String(field?.pattern ?? '').trim();
+                if (pattern.length > 0 && !existing.has(pattern) && !patterns.includes(pattern)) {
+                    patterns.push(pattern);
+                }
+            }
+            if (patterns.length === 0) {
+                deps.notifyWarning(deps.tr('stateAccessDeclarationEmpty'));
+                return;
+            }
+            appendStateAccessRows(patterns);
+            context.commit({ chatDeclarationName: resolved.name });
+        },
+        removeStateAccessRow(index) {
+            editDraft((draft) => {
+                applyRemoveStateAccessRow(draft, index);
+            });
+        },
+        updateStateAccessRow(index, patch) {
+            editDraft((draft) => {
+                applyUpdateStateAccessRow(draft, index, patch);
+            });
+        },
+        ...recallControls(editDraft),
+        ...worldInfoControls(editDraft),
         setOutputArtifactField(field, value) {
             editDraft((draft) => {
                 const [artifact] = draft.output.artifacts;

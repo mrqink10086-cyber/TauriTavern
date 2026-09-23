@@ -41,6 +41,9 @@ use tt_application::services::settings_service::{RequestProxyRuntime, SettingsSe
 use tt_application::services::skill_service::SkillService;
 use tt_application::services::sprite_service::SpriteService;
 use tt_application::services::stable_diffusion_service::StableDiffusionService;
+use tt_application::services::state_declaration_service::StateDeclarationService;
+use tt_application::services::state_machine_service::StateMachineService;
+use tt_application::services::state_predicate_service::StatePredicateService;
 use tt_application::services::theme_service::ThemeService;
 use tt_application::services::tokenization_service::TokenizationService;
 use tt_application::services::translate_service::TranslateService;
@@ -48,6 +51,7 @@ use tt_application::services::tts_service::TtsService;
 use tt_application::services::update_service::UpdateService;
 use tt_application::services::user_directory_service::UserDirectoryService;
 use tt_application::services::user_endpoint_access_service::UserEndpointAccessService;
+use tt_application::services::similharity_service::SimilharityService;
 use tt_application::services::user_service::UserService;
 use tt_application::services::vector_service::VectorService;
 use tt_application::services::world_info_service::WorldInfoService;
@@ -101,6 +105,9 @@ pub(super) async fn build(
         repositories.image_metadata_repository.clone(),
     ));
     let theme_service = Arc::new(ThemeService::new(repositories.theme_repository.clone()));
+    let state_declaration_service = Arc::new(StateDeclarationService::new(
+        repositories.state_declaration_repository.clone(),
+    ));
     let preset_service = Arc::new(PresetService::new(repositories.preset_repository.clone()));
     let quick_reply_service = Arc::new(QuickReplyService::new(
         repositories.quick_reply_repository.clone(),
@@ -145,12 +152,28 @@ pub(super) async fn build(
         repositories.searxng_search_repository.clone(),
     ));
     let skill_script_engine: Arc<dyn SkillScriptEngine> = Arc::new(QuickJsScriptEngine::new());
+    // The machine layer shares the skill script engine: it is what runs a
+    // spec's transition hooks.
+    let state_machine_service = Arc::new(StateMachineService::new(
+        repositories.state_machine_repository.clone(),
+        Some(skill_script_engine.clone()),
+    ));
+    let state_predicate_service = Arc::new(StatePredicateService::new(
+        repositories.state_predicate_repository.clone(),
+    ));
     let vector_service = Arc::new(VectorService::new(
         repositories.vector_repository.clone(),
         repositories.remote_embedding_repository.clone(),
         repositories.local_embedding_repository.clone(),
         repositories.secret_repository.clone(),
         ios_policy.clone(),
+    ));
+    // Similharity compatibility bridge: reuses the vector service's embedding
+    // implementation and forwards chunk operations to the user's Qdrant.
+    let similharity_service = Arc::new(SimilharityService::new(
+        repositories.qdrant_repository.clone(),
+        vector_service.clone(),
+        repositories.secret_repository.clone(),
     ));
     let agent_services = agent::build(
         &repositories,
@@ -278,6 +301,9 @@ pub(super) async fn build(
         background_service,
         image_metadata_service,
         theme_service,
+        state_declaration_service,
+        state_machine_service,
+        state_predicate_service,
         preset_service,
         quick_reply_service,
         agent_profile_service: agent_services.agent_profile_service,
@@ -287,6 +313,7 @@ pub(super) async fn build(
         agent_run_retention_automation_service: agent_services
             .agent_run_retention_automation_service,
         agent_runtime_service: agent_services.agent_runtime_service,
+        recall_service: agent_services.recall_service,
         chat_completion_service,
         llm_connection_service,
         user_endpoint_access_service,
@@ -294,6 +321,7 @@ pub(super) async fn build(
         provider_metadata_service,
         searxng_search_service,
         vector_service,
+        similharity_service,
         tokenization_service,
         stable_diffusion_service,
         translate_service,

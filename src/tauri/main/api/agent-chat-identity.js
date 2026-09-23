@@ -1,5 +1,9 @@
 // @ts-check
 
+/**
+ * @param {any} chatRef
+ * @returns {Promise<string>}
+ */
 export async function resolveStableChatId(chatRef) {
     const chatApi = window.__TAURITAVERN__?.api?.chat;
     if (!chatApi || typeof chatApi.open !== 'function') {
@@ -14,6 +18,11 @@ export async function resolveStableChatId(chatRef) {
     return String(await handle.stableId()).trim();
 }
 
+/**
+ * @param {any} expectedRef
+ * @param {string | null} [expectedStableChatId]
+ * @returns {Promise<void>}
+ */
 export async function assertCurrentChat(expectedRef, expectedStableChatId = null) {
     const currentRef = window.__TAURITAVERN__?.api?.chat?.current?.ref?.();
     if (sameChatRef(currentRef, expectedRef)) return;
@@ -24,6 +33,11 @@ export async function assertCurrentChat(expectedRef, expectedStableChatId = null
     throw new Error('agent.commit_chat_mismatch: active chat changed before commit');
 }
 
+/**
+ * @param {any} a
+ * @param {any} b
+ * @returns {boolean}
+ */
 function sameChatRef(a, b) {
     if (!a || !b || a.kind !== b.kind) return false;
     if (a.kind === 'character') {

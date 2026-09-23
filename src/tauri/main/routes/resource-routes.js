@@ -1,3 +1,5 @@
+import { registerStatePredicateRoutes } from './state-predicate-routes.js';
+
 function isNotFoundError(error) {
     const message = String(error?.message || error || '').toLowerCase();
     return message.includes('not found')
@@ -387,6 +389,76 @@ export function registerResourceRoutes(router, context, { jsonResponse, textResp
         await context.safeInvoke('delete_theme', { dto: { name: body?.name || '' } });
         return jsonResponse({ ok: true });
     });
+
+    router.post('/api/state-declarations/save', async ({ body }) => {
+        await context.safeInvoke('save_state_declaration', { dto: body || {} });
+        return jsonResponse({ ok: true });
+    });
+
+    router.post('/api/state-declarations/get', async ({ body }) => {
+        const declaration = await context.safeInvoke('get_state_declaration', { name: body?.name || '' });
+        return jsonResponse(declaration);
+    });
+
+    router.post('/api/state-declarations/list', async () => {
+        const names = await context.safeInvoke('list_state_declarations');
+        return jsonResponse(Array.isArray(names) ? names : []);
+    });
+
+    router.post('/api/state-declarations/delete', async ({ body }) => {
+        await context.safeInvoke('delete_state_declaration', { name: body?.name || '' });
+        return jsonResponse({ ok: true });
+    });
+
+    router.post('/api/state/injection', async ({ body }) => {
+        const result = await context.safeInvoke('get_state_injection', { dto: body || {} });
+        return jsonResponse(result);
+    });
+
+    router.post('/api/state/panel', async ({ body }) => {
+        const result = await context.safeInvoke('get_state_panel', { dto: body || {} });
+        return jsonResponse(result);
+    });
+
+    // Recording where a published state version landed. The frontend calls this
+    // through the host ABI right after it saves the message; the route exists so
+    // a backfill can be driven from outside the generation flow as well.
+    router.post('/api/recall/state-floors', async ({ body }) => {
+        const changed = await context.safeInvoke('recall_bind_state_floors', { dto: body || {} });
+        return jsonResponse({ changed: Number(changed) || 0 });
+    });
+
+    router.post('/api/state-machines/save', async ({ body }) => {
+        await context.safeInvoke('save_state_machine', { dto: body || {} });
+        return jsonResponse({ ok: true });
+    });
+
+    router.post('/api/state-machines/get', async ({ body }) => {
+        const machine = await context.safeInvoke('get_state_machine', { name: body?.name || '' });
+        return jsonResponse(machine);
+    });
+
+    router.post('/api/state-machines/list', async () => {
+        const names = await context.safeInvoke('list_state_machines');
+        return jsonResponse(Array.isArray(names) ? names : []);
+    });
+
+    router.post('/api/state-machines/delete', async ({ body }) => {
+        await context.safeInvoke('delete_state_machine', { name: body?.name || '' });
+        return jsonResponse({ ok: true });
+    });
+
+    router.post('/api/state-machines/validate', async ({ body }) => {
+        const result = await context.safeInvoke('validate_state_machine', { dto: body || {} });
+        return jsonResponse(result);
+    });
+
+    router.post('/api/state-machines/evaluate', async ({ body }) => {
+        const result = await context.safeInvoke('evaluate_state_machine', { dto: body || {} });
+        return jsonResponse(result);
+    });
+
+    registerStatePredicateRoutes(router, context, { jsonResponse });
 
     router.post('/api/groups/all', async () => {
         const groups = await context.safeInvoke('get_all_groups');

@@ -286,10 +286,20 @@ pub(super) fn store_error(
     not_found_message: &'static str,
 ) -> Response<Vec<u8>> {
     match error_value {
-        HostResourceStoreError::NotFound(_) => error(StatusCode::NOT_FOUND, not_found_message),
-        HostResourceStoreError::Forbidden(message) => error(StatusCode::FORBIDDEN, &message),
+        HostResourceStoreError::NotFound(message) => {
+            tracing::debug!("Host resource not found: {message}");
+            error(StatusCode::NOT_FOUND, not_found_message)
+        }
+        // Forbidden and Internal messages carry local filesystem paths. They are useful
+        // for diagnosis but must not reach the WebView, where any extension script could
+        // read them off the response body.
+        HostResourceStoreError::Forbidden(message) => {
+            tracing::warn!("Host resource access forbidden: {message}");
+            error(StatusCode::FORBIDDEN, "Forbidden")
+        }
         HostResourceStoreError::Internal(message) => {
-            error(StatusCode::INTERNAL_SERVER_ERROR, &message)
+            tracing::error!("Host resource read failed: {message}");
+            error(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error")
         }
     }
 }

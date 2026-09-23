@@ -34,6 +34,17 @@ export function requireHostApi<K extends keyof TauriTavernHostApi>(name: K): Non
     return api;
 }
 
+/**
+ * The host API when it is there, and nothing when it is not.
+ *
+ * For a panel section that can render without what it was going to show: taking
+ * the whole panel down over a missing list would trade one absent readout for
+ * every other one.
+ */
+export function tryHostApi<K extends keyof TauriTavernHostApi>(name: K): TauriTavernHostApi[K] | null {
+    return window.__TAURITAVERN__?.api?.[name] ?? null;
+}
+
 export function requireAgentApi(): TauriTavernAgentApi {
     const agent = requireHostApi('agent');
     if (!agent.profiles) {

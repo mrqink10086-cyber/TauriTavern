@@ -25,6 +25,7 @@ import {
 } from './agent-chat-commit-reasoning.js';
 import { CHAT_COMMIT_REASON } from '../../../scripts/chat-payload-transport.js';
 import { finishHostPresentation } from './agent-chat-presentation-checkpoint.js';
+import { bindRecallFloor } from './agent-chat-recall-binding.js';
 
 const TERMINAL_EVENTS = new Set(['run_completed', 'run_partial_success', 'run_cancelled', 'run_failed']);
 
@@ -440,6 +441,10 @@ async function handlePersistentStateMetadataUpdateRequested({ state, event, safe
                 updateId,
             },
         });
+
+        // After the update is resolved, so a binding problem can never turn a
+        // committed answer into a failed run.
+        await bindRecallFloor({ safeInvoke, payload, stateId, floor: messageId });
     } catch (error) {
         await safeInvoke('resolve_agent_persistent_state_metadata_update', {
             dto: {

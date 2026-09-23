@@ -7,8 +7,8 @@ use tt_domain::models::agent::{
     AgentRun, WorkspaceManifest, WorkspacePath, WorkspacePersistentChangeSet,
 };
 use tt_ports::repositories::workspace_repository::{
-    WorkspaceAppendResult, WorkspaceFile, WorkspaceFileList, WorkspaceRepository,
-    WorkspaceWriteGuard,
+    PersistentFileWrite, WorkspaceAppendResult, WorkspaceFile, WorkspaceFileList,
+    WorkspaceRepository, WorkspaceWriteGuard,
 };
 
 pub(in crate::services::agent_runtime_service) struct InvocationWorkspaceRepository<'a> {
@@ -46,6 +46,17 @@ impl WorkspaceRepository for InvocationWorkspaceRepository<'_> {
     ) -> Result<(), DomainError> {
         self.inner
             .initialize_run(run, manifest, prompt_snapshot, resolved_profile)
+            .await
+    }
+
+    async fn read_persistent_state_file(
+        &self,
+        workspace_id: &str,
+        state_id: &str,
+        path: &WorkspacePath,
+    ) -> Result<WorkspaceFile, DomainError> {
+        self.inner
+            .read_persistent_state_file(workspace_id, state_id, path)
             .await
     }
 
@@ -130,6 +141,19 @@ impl WorkspaceRepository for InvocationWorkspaceRepository<'_> {
     ) -> Result<WorkspacePersistentChangeSet, DomainError> {
         self.inner
             .commit_persistent_changes(run_id, previous_state_id)
+            .await
+    }
+
+    /// Pass-through, like the commit above: this wrapper narrows what a tool may
+    /// address by profile, and a run-less publish has no run to narrow.
+    async fn publish_persistent_files(
+        &self,
+        workspace_id: &str,
+        base_state_id: Option<&str>,
+        files: &[PersistentFileWrite],
+    ) -> Result<WorkspacePersistentChangeSet, DomainError> {
+        self.inner
+            .publish_persistent_files(workspace_id, base_state_id, files)
             .await
     }
 }

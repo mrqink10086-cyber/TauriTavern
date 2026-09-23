@@ -6,14 +6,15 @@ import {
     type EmbeddedAssetsActions,
     type EmbeddedAssetsInitial,
     type EmbeddedAssetsRead,
-    type EmbeddedProfileItem,
-    type EmbeddedSkillItem,
+    embeddedMachineSubtitle,
+    embeddedPredicateSubtitle,
     embeddedSkillSubtitle,
+    embeddedStateSubtitle,
     profileDisplayName,
     skillOptionLabel,
-    type SkillOption,
 } from './EmbeddedAssetsContract';
-import type { AgentSystemTr } from './i18n';
+import { EmbedAssetSection, EmbeddedAssetGroup, type EmbeddedEntry } from './EmbeddedAssetSections';
+import type { AgentSystemMessageKey, AgentSystemTr } from './i18n';
 
 export type EmbeddedAssetsAppProps = {
     initialLoad: Promise<EmbeddedAssetsInitial>;
@@ -22,52 +23,88 @@ export type EmbeddedAssetsAppProps = {
     onRequestClose: () => void;
 };
 
-type PanelState = {
+/**
+ * Selections and the lists they point at, plus the target this panel is about.
+ *
+ * Every kind is here twice: what can be carried (`profiles`…`predicates`) and
+ * what already is (`embeddedStates`…). The two lists are what the panel is for.
+ */
+type PanelState = Omit<EmbeddedAssetsInitial, 'targetInfo'> & {
+    targetInfo: EmbeddedAssetsInitial['targetInfo'] | null;
     initialized: boolean;
     loading: boolean;
     saving: boolean;
     error: string;
-    targetInfo: EmbeddedAssetsInitial['targetInfo'] | null;
-    profiles: TauriTavernAgentProfileSummary[];
-    skills: SkillOption[];
-    embeddedProfiles: EmbeddedProfileItem[];
-    embeddedSkills: EmbeddedSkillItem[];
     selectedProfileId: string;
     selectedSkillKey: string;
+    selectedStateName: string;
+    selectedMachineName: string;
+    selectedPredicateName: string;
+};
+
+const EMPTY_LISTS: Omit<PanelState, 'initialized' | 'loading' | 'saving' | 'error' | 'targetInfo'> = {
+    profiles: [],
+    skills: [],
+    states: [],
+    machines: [],
+    predicates: [],
+    embeddedProfiles: [],
+    embeddedSkills: [],
+    embeddedStates: [],
+    embeddedMachines: [],
+    embeddedPredicates: [],
+    selectedProfileId: '',
+    selectedSkillKey: '',
+    selectedStateName: '',
+    selectedMachineName: '',
+    selectedPredicateName: '',
 };
 
 const INITIAL_STATE: PanelState = {
+    ...EMPTY_LISTS,
+    targetInfo: null,
     initialized: false,
     loading: true,
     saving: false,
     error: '',
-    targetInfo: null,
-    profiles: [],
-    skills: [],
-    embeddedProfiles: [],
-    embeddedSkills: [],
-    selectedProfileId: '',
-    selectedSkillKey: '',
 };
 
 function embeddableProfilesOf(state: PanelState): TauriTavernAgentProfileSummary[] {
     return state.profiles.filter((profile) => profile.id !== DEFAULT_PROFILE_ID);
 }
 
-// Selections point at list entries; when the underlying lists change, fall
-// back to the first available entry instead of leaving a dangling selection.
+/**
+ * Point every selection at something that exists.
+ *
+ * The lists change under the panel after every mutation, so a selection that
+ * names a deleted entry falls back to the first one rather than dangling.
+ */
 function withSyncedSelections(state: PanelState): PanelState {
     const embeddable = embeddableProfilesOf(state);
-    const selectedProfileId = embeddable.some((profile) => profile.id === state.selectedProfileId)
-        ? state.selectedProfileId
-        : (embeddable[0]?.id ?? '');
-    const selectedSkillKey = state.skills.some((skill) => skill.key === state.selectedSkillKey)
-        ? state.selectedSkillKey
-        : (state.skills[0]?.key ?? '');
-    if (selectedProfileId === state.selectedProfileId && selectedSkillKey === state.selectedSkillKey) {
+    const pick = (current: string, known: string[], first: string | undefined): string => (
+        known.includes(current) ? current : (first ?? '')
+    );
+    const selectedProfileId = pick(state.selectedProfileId, embeddable.map((profile) => profile.id), embeddable[0]?.id);
+    const selectedSkillKey = pick(state.selectedSkillKey, state.skills.map((skill) => skill.key), state.skills[0]?.key);
+    const selectedStateName = pick(state.selectedStateName, state.states, state.states[0]);
+    const selectedMachineName = pick(state.selectedMachineName, state.machines, state.machines[0]);
+    const selectedPredicateName = pick(state.selectedPredicateName, state.predicates, state.predicates[0]);
+
+    if (selectedProfileId === state.selectedProfileId
+        && selectedSkillKey === state.selectedSkillKey
+        && selectedStateName === state.selectedStateName
+        && selectedMachineName === state.selectedMachineName
+        && selectedPredicateName === state.selectedPredicateName) {
         return state;
     }
-    return { ...state, selectedProfileId, selectedSkillKey };
+    return {
+        ...state,
+        selectedProfileId,
+        selectedSkillKey,
+        selectedStateName,
+        selectedMachineName,
+        selectedPredicateName,
+    };
 }
 
 export function EmbeddedAssetsApp({ initialLoad, actions, tr, onRequestClose }: EmbeddedAssetsAppProps) {
@@ -84,14 +121,10 @@ export function EmbeddedAssetsApp({ initialLoad, actions, tr, onRequestClose }: 
                 }
                 setState((current) => withSyncedSelections({
                     ...current,
+                    ...data,
                     initialized: true,
                     loading: false,
                     error: '',
-                    targetInfo: data.targetInfo,
-                    profiles: data.profiles,
-                    skills: data.skills,
-                    embeddedProfiles: data.embeddedProfiles,
-                    embeddedSkills: data.embeddedSkills,
                 }));
             },
             (error: unknown) => {
@@ -110,9 +143,11 @@ export function EmbeddedAssetsApp({ initialLoad, actions, tr, onRequestClose }: 
     function applyEmbedded(embedded: EmbeddedAssetsRead): void {
         setState((current) => withSyncedSelections({
             ...current,
-            targetInfo: embedded.target,
             embeddedProfiles: embedded.profiles,
             embeddedSkills: embedded.skills,
+            embeddedStates: embedded.states,
+            embeddedMachines: embedded.machines,
+            embeddedPredicates: embedded.predicates,
         }));
     }
 
@@ -132,49 +167,82 @@ export function EmbeddedAssetsApp({ initialLoad, actions, tr, onRequestClose }: 
         }
     }
 
-    async function embedSelectedProfile(): Promise<void> {
-        if (!state.selectedProfileId) {
-            throw new Error(tr('noEmbeddableProfiles'));
-        }
-        const profileId = state.selectedProfileId;
-        await runAssetAction(async () => {
-            const embeddedId = await actions.embedProfile(profileId);
-            actions.toastSuccess(tr('embeddedProfile', { id: embeddedId }));
-        });
-    }
-
-    async function embedSelectedSkill(): Promise<void> {
-        const skill = state.skills.find((item) => item.key === state.selectedSkillKey) ?? null;
-        if (!skill) {
-            throw new Error(tr('selectSkillFirst'));
+    /**
+     * Carry one saved document, reporting what it was carried under.
+     *
+     * An empty name is the one case with nothing to do: the buttons are disabled
+     * without a selection, so this is the guard behind that, not a path to warn on.
+     */
+    async function carry(
+        name: string,
+        embed: (name: string) => Promise<string>,
+        done: (name: string) => string,
+    ): Promise<void> {
+        if (!name) {
+            return;
         }
         await runAssetAction(async () => {
-            await actions.embedSkill(skill);
-            actions.toastSuccess(tr('embeddedSkill', { name: skillOptionLabel(skill) }));
+            actions.toastSuccess(done(await embed(name)));
         });
     }
 
-    async function removeProfileItem(item: EmbeddedProfileItem): Promise<void> {
-        const profileId = item.profile.id;
+    /** Take one carried entry back off, reporting what was removed. */
+    async function takeBack(
+        entry: EmbeddedEntry,
+        remove: (key: string) => Promise<void>,
+        done: (key: string) => string,
+    ): Promise<void> {
         await runAssetAction(async () => {
-            await actions.removeProfile(profileId);
-            actions.toastSuccess(tr('removedEmbeddedProfile', { id: profileId }));
-        });
-    }
-
-    async function removeSkillItem(item: EmbeddedSkillItem): Promise<void> {
-        const skillName = item.skillName;
-        await runAssetAction(async () => {
-            await actions.removeSkill(skillName);
-            actions.toastSuccess(tr('removedEmbeddedSkill', { name: skillName }));
+            await remove(entry.key);
+            actions.toastSuccess(done(entry.key));
         });
     }
 
     const embeddableProfiles = embeddableProfilesOf(state);
     const selectedSkill = state.skills.find((skill) => skill.key === state.selectedSkillKey) ?? null;
-    const selectedProfileEmbedded = state.embeddedProfiles.some((item) => item.profile.id === state.selectedProfileId);
-    const selectedSkillEmbedded = selectedSkill !== null
-        && state.embeddedSkills.some((item) => item.skillName === selectedSkill.name);
+    const carried = {
+        profiles: state.embeddedProfiles.map((item): EmbeddedEntry => ({
+            key: item.profile.id,
+            name: profileDisplayName(item),
+            subtitle: item.profile.id,
+            icon: 'fa-id-card-clip',
+        })),
+        skills: state.embeddedSkills.map((item): EmbeddedEntry => ({
+            key: item.skillName,
+            name: item.skillName,
+            subtitle: embeddedSkillSubtitle(item),
+            icon: 'fa-book-bookmark',
+        })),
+        states: state.embeddedStates.map((item): EmbeddedEntry => ({
+            key: item.name,
+            name: item.name,
+            subtitle: embeddedStateSubtitle(item),
+            icon: 'fa-table-columns',
+        })),
+        machines: state.embeddedMachines.map((item): EmbeddedEntry => ({
+            key: item.name,
+            name: item.name,
+            subtitle: embeddedMachineSubtitle(item),
+            icon: 'fa-diagram-project',
+        })),
+        predicates: state.embeddedPredicates.map((item): EmbeddedEntry => ({
+            key: item.name,
+            name: item.name,
+            subtitle: embeddedPredicateSubtitle(item),
+            icon: 'fa-filter',
+        })),
+    };
+    const alreadyCarried = {
+        profiles: carried.profiles.some((entry) => entry.key === state.selectedProfileId),
+        skills: selectedSkill !== null && carried.skills.some((entry) => entry.key === selectedSkill.name),
+        states: carried.states.some((entry) => entry.key === state.selectedStateName),
+        machines: carried.machines.some((entry) => entry.key === state.selectedMachineName),
+        predicates: carried.predicates.some((entry) => entry.key === state.selectedPredicateName),
+    };
+    const label = (kind: keyof typeof alreadyCarried, embedKey: AgentSystemMessageKey): string => (
+        alreadyCarried[kind] ? tr('updateEmbeddedAsset') : tr(embedKey)
+    );
+
     const targetInfo = state.targetInfo;
     const targetTypeLabel = !targetInfo
         ? ''
@@ -220,71 +288,109 @@ export function EmbeddedAssetsApp({ initialLoad, actions, tr, onRequestClose }: 
                             </div>
                         )}
 
-                        <section className="ttas-embed-card">
-                            <div className="ttas-embed-section-title">
-                                <i className="fa-solid fa-id-card-clip"></i>
-                                <h4>{tr('profiles')}</h4>
-                            </div>
-                            <div className="ttas-embed-action-row">
-                                <label className="ttas-field">
-                                    <span>{tr('selectProfile')}</span>
-                                    <select
-                                        value={state.selectedProfileId}
-                                        disabled={state.saving || embeddableProfiles.length === 0}
-                                        onChange={(event) => {
-                                            setState((current) => ({ ...current, selectedProfileId: event.target.value }));
-                                        }}
-                                    >
-                                        {embeddableProfiles.map((profile) => (
-                                            <option key={profile.id} value={profile.id}>{profile.displayName || profile.id}</option>
-                                        ))}
-                                    </select>
-                                </label>
-                                <button
-                                    type="button"
-                                    className="menu_button menu_button_icon ttas-primary-button"
-                                    disabled={state.saving || !state.selectedProfileId}
-                                    onClick={() => void embedSelectedProfile()}
-                                >
-                                    <i className={`fa-solid ${state.saving ? 'fa-spinner fa-spin' : 'fa-file-arrow-down'}`}></i>
-                                    <span>{selectedProfileEmbedded ? tr('updateEmbeddedAsset') : tr('embedProfile')}</span>
-                                </button>
-                            </div>
-                            {embeddableProfiles.length === 0 && <p className="ttas-embed-empty">{tr('noEmbeddableProfiles')}</p>}
-                        </section>
+                        <EmbedAssetSection
+                            icon="fa-id-card-clip"
+                            actionIcon="fa-file-arrow-down"
+                            title={tr('profiles')}
+                            label={tr('selectProfile')}
+                            options={embeddableProfiles.map((profile) => ({
+                                value: profile.id,
+                                text: profile.displayName || profile.id,
+                            }))}
+                            selected={state.selectedProfileId}
+                            emptyHint={tr('noEmbeddableProfiles')}
+                            actionLabel={label('profiles', 'embedProfile')}
+                            disabled={state.saving}
+                            onSelect={(value) => setState((current) => ({ ...current, selectedProfileId: value }))}
+                            onAction={() => void carry(
+state.selectedProfileId,
+                                actions.embedProfile,
+                                (id) => tr('embeddedProfile', { id }),
+                            )}
+                        />
 
-                        <section className="ttas-embed-card">
-                            <div className="ttas-embed-section-title">
-                                <i className="fa-solid fa-book-bookmark"></i>
-                                <h4>{tr('skills')}</h4>
-                            </div>
-                            <div className="ttas-embed-action-row">
-                                <label className="ttas-field">
-                                    <span>{tr('selectSkill')}</span>
-                                    <select
-                                        value={state.selectedSkillKey}
-                                        disabled={state.saving || state.skills.length === 0}
-                                        onChange={(event) => {
-                                            setState((current) => ({ ...current, selectedSkillKey: event.target.value }));
-                                        }}
-                                    >
-                                        {state.skills.map((skill) => (
-                                            <option key={skill.key} value={skill.key}>{skillOptionLabel(skill)}</option>
-                                        ))}
-                                    </select>
-                                </label>
-                                <button
-                                    type="button"
-                                    className="menu_button menu_button_icon ttas-primary-button"
-                                    disabled={state.saving || !selectedSkill}
-                                    onClick={() => void embedSelectedSkill()}
-                                >
-                                    <i className={`fa-solid ${state.saving ? 'fa-spinner fa-spin' : 'fa-file-zipper'}`}></i>
-                                    <span>{selectedSkillEmbedded ? tr('updateEmbeddedAsset') : tr('embedSkill')}</span>
-                                </button>
-                            </div>
-                            {state.skills.length === 0 && <p className="ttas-embed-empty">{tr('noSkillsInstalled')}</p>}
-                        </section>
+                        <EmbedAssetSection
+                            icon="fa-book-bookmark"
+                            actionIcon="fa-file-zipper"
+                            title={tr('skills')}
+                            label={tr('selectSkill')}
+                            options={state.skills.map((skill) => ({
+                                value: skill.key,
+                                text: skillOptionLabel(skill),
+                            }))}
+                            selected={state.selectedSkillKey}
+                            emptyHint={tr('noSkillsInstalled')}
+                            actionLabel={label('skills', 'embedSkill')}
+                            disabled={state.saving}
+                            onSelect={(value) => setState((current) => ({ ...current, selectedSkillKey: value }))}
+                            onAction={() => {
+                                const skill = selectedSkill;
+                                void carry(
+                                    skill?.name ?? '',
+                                    async () => {
+                                        if (skill) {
+                                            await actions.embedSkill(skill);
+                                        }
+                                        return skill?.name ?? '';
+                                    },
+                                    (name) => tr('embeddedSkill', { name: skill ? skillOptionLabel(skill) : name }),
+                                );
+                            }}
+                        />
+
+                        <EmbedAssetSection
+                            icon="fa-table-columns"
+                            actionIcon="fa-file-arrow-down"
+                            title={tr('scenes')}
+                            label={tr('selectScene')}
+                            options={state.states.map((name) => ({ value: name, text: name }))}
+                            selected={state.selectedStateName}
+                            emptyHint={tr('noStateDeclarations')}
+                            actionLabel={label('states', 'embedState')}
+                            disabled={state.saving}
+                            onSelect={(value) => setState((current) => ({ ...current, selectedStateName: value }))}
+                            onAction={() => void carry(
+state.selectedStateName,
+                                actions.embedState,
+                                (name) => tr('embeddedState', { name }),
+                            )}
+                        />
+
+                        <EmbedAssetSection
+                            icon="fa-diagram-project"
+                            actionIcon="fa-file-arrow-down"
+                            title={tr('stateMachineTab')}
+                            label={tr('selectMachine')}
+                            options={state.machines.map((name) => ({ value: name, text: name }))}
+                            selected={state.selectedMachineName}
+                            emptyHint={tr('noStateMachines')}
+                            actionLabel={label('machines', 'embedMachine')}
+                            disabled={state.saving}
+                            onSelect={(value) => setState((current) => ({ ...current, selectedMachineName: value }))}
+                            onAction={() => void carry(
+state.selectedMachineName,
+                                actions.embedMachine,
+                                (name) => tr('embeddedMachine', { name }),
+                            )}
+                        />
+
+                        <EmbedAssetSection
+                            icon="fa-filter"
+                            actionIcon="fa-file-arrow-down"
+                            title={tr('statePredicatesTab')}
+                            label={tr('selectPredicateSet')}
+                            options={state.predicates.map((name) => ({ value: name, text: name }))}
+                            selected={state.selectedPredicateName}
+                            emptyHint={tr('noStatePredicateSets')}
+                            actionLabel={label('predicates', 'embedPredicateSet')}
+                            disabled={state.saving}
+                            onSelect={(value) => setState((current) => ({ ...current, selectedPredicateName: value }))}
+                            onAction={() => void carry(
+state.selectedPredicateName,
+                                actions.embedPredicateSet,
+                                (name) => tr('embeddedPredicate', { name }),
+                            )}
+                        />
 
                         <section className="ttas-embed-card ttas-embed-current">
                             <div className="ttas-embed-section-title">
@@ -292,63 +398,66 @@ export function EmbeddedAssetsApp({ initialLoad, actions, tr, onRequestClose }: 
                                 <h4>{tr('embeddedAssets')}</h4>
                             </div>
 
-                            <div className="ttas-embedded-group">
-                                <h5>{tr('embeddedProfiles')}</h5>
-                                {state.embeddedProfiles.length > 0 ? (
-                                    <div className="ttas-embedded-list">
-                                        {state.embeddedProfiles.map((item) => (
-                                            <div key={item.profile.id} className="ttas-embedded-item">
-                                                <i className="fa-solid fa-id-card-clip"></i>
-                                                <div>
-                                                    <strong>{profileDisplayName(item)}</strong>
-                                                    <span>{item.profile.id}</span>
-                                                </div>
-                                                <button
-                                                    type="button"
-                                                    className="menu_button menu_button_icon ttas-danger-button"
-                                                    title={tr('removeEmbeddedAsset')}
-                                                    aria-label={tr('removeEmbeddedAsset')}
-                                                    disabled={state.saving}
-                                                    onClick={() => void removeProfileItem(item)}
-                                                >
-                                                    <i className="fa-solid fa-xmark"></i>
-                                                </button>
-                                            </div>
-                                        ))}
-                                    </div>
-                                ) : (
-                                    <p className="ttas-embed-empty">{tr('noEmbeddedProfiles')}</p>
+                            <EmbeddedAssetGroup
+                                title={tr('embeddedProfiles')}
+                                entries={carried.profiles}
+                                emptyHint={tr('noEmbeddedProfiles')}
+                                disabled={state.saving}
+                                onRemove={(entry) => void takeBack(
+                                    entry,
+                                    actions.removeProfile,
+                                    (id) => tr('removedEmbeddedProfile', { id }),
                                 )}
-                            </div>
-
-                            <div className="ttas-embedded-group">
-                                <h5>{tr('embeddedSkills')}</h5>
-                                {state.embeddedSkills.length > 0 ? (
-                                    <div className="ttas-embedded-list">
-                                        {state.embeddedSkills.map((item) => (
-                                            <div key={item.skillName} className="ttas-embedded-item">
-                                                <i className="fa-solid fa-book-bookmark"></i>
-                                                <div>
-                                                    <strong>{item.skillName}</strong>
-                                                    <span>{embeddedSkillSubtitle(item)}</span>
-                                                </div>
-                                                <button
-                                                    type="button"
-                                                    className="menu_button menu_button_icon ttas-danger-button"
-                                                    title={tr('removeEmbeddedAsset')}
-                                                    aria-label={tr('removeEmbeddedAsset')}
-                                                    disabled={state.saving}
-                                                    onClick={() => void removeSkillItem(item)}
-                                                >
-                                                    <i className="fa-solid fa-xmark"></i>
-                                                </button>
-                                            </div>
-                                        ))}
-                                    </div>
-                                ) : (
-                                    <p className="ttas-embed-empty">{tr('noEmbeddedSkills')}</p>
+                                tr={tr}
+                            />
+                            <EmbeddedAssetGroup
+                                title={tr('embeddedSkills')}
+                                entries={carried.skills}
+                                emptyHint={tr('noEmbeddedSkills')}
+                                disabled={state.saving}
+                                onRemove={(entry) => void takeBack(
+                                    entry,
+                                    actions.removeSkill,
+                                    (name) => tr('removedEmbeddedSkill', { name }),
                                 )}
-                            </div>
+                                tr={tr}
+                            />
+                            <EmbeddedAssetGroup
+                                title={tr('embeddedStates')}
+                                entries={carried.states}
+                                emptyHint={tr('noEmbeddedScenes')}
+                                disabled={state.saving}
+                                onRemove={(entry) => void takeBack(
+                                    entry,
+                                    actions.removeState,
+                                    (name) => tr('removedEmbeddedScene', { name }),
+                                )}
+                                tr={tr}
+                            />
+                            <EmbeddedAssetGroup
+                                title={tr('embeddedMachines')}
+                                entries={carried.machines}
+                                emptyHint={tr('noEmbeddedMachines')}
+                                disabled={state.saving}
+                                onRemove={(entry) => void takeBack(
+                                    entry,
+                                    actions.removeMachine,
+                                    (name) => tr('removedEmbeddedMachine', { name }),
+                                )}
+                                tr={tr}
+                            />
+                            <EmbeddedAssetGroup
+                                title={tr('embeddedPredicateSets')}
+                                entries={carried.predicates}
+                                emptyHint={tr('noEmbeddedPredicateSets')}
+                                disabled={state.saving}
+                                onRemove={(entry) => void takeBack(
+                                    entry,
+                                    actions.removePredicateSet,
+                                    (name) => tr('removedEmbeddedPredicateSet', { name }),
+                                )}
+                                tr={tr}
+                            />
                         </section>
                     </>
                 )}

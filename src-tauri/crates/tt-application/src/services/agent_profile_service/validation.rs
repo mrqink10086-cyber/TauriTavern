@@ -10,6 +10,7 @@ use tt_domain::models::agent::profile::{
     AgentWorkspacePolicy, ResolvedAgentToolPolicy,
 };
 use tt_domain::models::mcp::{McpRegistrationId, validate_native_tool_name};
+use tt_domain::models::state_access::StateAccessPolicy;
 use tt_domain::models::tool::{ToolCatalog, ToolDescriptionOverride, ToolDescriptor, ToolId};
 
 use super::constants::{
@@ -273,6 +274,7 @@ pub(super) fn validate_tool_policy(
         max_rounds: policy.max_rounds,
         max_calls_per_run: policy.max_calls_per_run,
         mcp_result_inline_char_limit: policy.mcp_result_inline_char_limit,
+        unfolded_tool_turns: policy.unfolded_tool_turns,
         max_calls_per_tool,
     })
 }
@@ -513,6 +515,27 @@ pub(super) fn validate_workspace_policy(
                 "agent.profile_workspace_root_invalid: writable root `{root}` is not visible"
             )));
         }
+    }
+    Ok(())
+}
+
+/// Two access entries that can cover the same field leave the permission
+/// ambiguous, so the Profile is refused at save time instead of guessing at
+/// write time. The rule matches the declaration's, because the entries are
+/// written the same way and mean the same key space.
+pub(super) fn validate_state_access_policy(
+    policy: &StateAccessPolicy,
+) -> Result<(), ApplicationError> {
+    let overlaps = policy.overlaps();
+    if !overlaps.is_empty() {
+        let pairs = overlaps
+            .iter()
+            .map(|overlap| format!("`{}` vs `{}`", overlap.first, overlap.second))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(ApplicationError::ValidationError(format!(
+            "agent.profile_state_access_overlapping_patterns: {pairs}"
+        )));
     }
     Ok(())
 }

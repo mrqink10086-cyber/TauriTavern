@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde_json::{Map, Value, json};
 
@@ -8,7 +8,13 @@ use super::super::session::AgentToolSession;
 use super::super::workspace::workspace_access_policy;
 use super::list::skill_is_visible;
 use crate::errors::ApplicationError;
+use crate::services::agent_profile_service::constants::STATE_ROOT;
 use crate::services::skill_service::SkillService;
+use crate::services::state_runtime::{
+    access_from_snapshot, declaration_from_snapshot, read_state_document, write_state_document,
+};
+use tt_domain::models::state::{StateUpdateError, StateUpdateRequest, apply_update, resolve_request};
+use tt_domain::models::state_access::check_writable;
 use tt_domain::models::agent::profile::ResolvedAgentProfile;
 use tt_domain::models::agent::{AgentToolResult, WorkspacePath};
 use tt_domain::models::skill::{SkillFileKind, SkillFileRef, SkillScope};
@@ -156,7 +162,8 @@ pub(in crate::services::agent_tools) async fn script(
         .map(|(path, file)| (path.clone(), file.text.clone()))
         .collect::<HashMap<_, _>>();
 
-    let script_context = build_script_context_json(&prompt_snapshot)?;
+    let state_fields = read_script_state(workspace_repository, run_id, &prompt_snapshot).await?;
+    let script_context = build_script_context_json(&prompt_snapshot, &state_fields)?;
 
     tracing::info!(
         "skill.run_script invoked: skill=`{skill}` script=`{script}` args_bytes={}",
@@ -248,6 +255,28 @@ pub(in crate::services::agent_tools) async fn script(
     )> = Vec::with_capacity(result.writes.len());
     for write in &result.writes {
         let path = WorkspacePath::parse(&write.path).map_err(ApplicationError::from)?;
+        // State is written through the tool or a `stateWrites` return, never by
+        // putting the document back as a file: a write here would skip both the
+        // declaration check and the per-field authorization those two go through.
+        if is_state_path(&path) {
+            tracing::warn!(
+                "skill.run_script rejected a write into the state root: {}",
+                write.path
+            );
+            return Ok((
+                tool_error(
+                    call,
+                    SKILL_SCRIPT_WRITE_FAILED,
+                    &format!(
+                        "`{}` is state, which a script does not write as a file. Return it as \
+                         `stateWrites: [{{ key, values }}]` instead — that path checks the \
+                         declaration and which fields are writable.",
+                        write.path
+                    ),
+                ),
+                AgentToolEffect::None,
+            ));
+        }
         if !workspace_policy.is_writable(&path) {
             tracing::warn!(
                 "skill.run_script rejected write outside writable roots: {}",
@@ -326,8 +355,20 @@ pub(in crate::services::agent_tools) async fn script(
         }
     }
 
+    let state_note = apply_state_writes(
+        workspace_repository,
+        run_id,
+        &prompt_snapshot,
+        &result.value,
+    )
+    .await?;
+
     let rendered = result.value.to_string();
-    let content = format!("Executed skill script `{skill}/{entry_module}`. Result:\n{rendered}");
+    let mut content = format!("Executed skill script `{skill}/{entry_module}`. Result:\n{rendered}");
+    if let Some(note) = state_note {
+        content.push('\n');
+        content.push_str(&note);
+    }
 
     let resource_refs = written_files
         .iter()
@@ -423,7 +464,11 @@ async fn build_workspace_snapshot(
     let mut snapshot = HashMap::new();
     for root in visible_roots {
         let root = root.trim();
-        if root.is_empty() {
+        // The state root is not workspace material. A script reads state through
+        // `context.state` and writes it through a `stateWrites` return, so the
+        // file itself is withheld rather than offered as raw JSON that would let
+        // a script skip every rule the state system exists to enforce.
+        if root.is_empty() || root.trim_matches('/') == STATE_ROOT {
             continue;
         }
         let root_path = WorkspacePath::parse(root).map_err(ApplicationError::from)?;
@@ -451,6 +496,17 @@ async fn build_workspace_snapshot(
     Ok(snapshot)
 }
 
+/// Whether a workspace path lives inside the state root.
+///
+/// Matched on whole segments, so `state` and `state/document.json` are state
+/// while a hypothetical `stateful/notes.txt` is not.
+fn is_state_path(path: &WorkspacePath) -> bool {
+    match path.as_str().trim_matches('/').strip_prefix(STATE_ROOT) {
+        Some(rest) => rest.is_empty() || rest.starts_with('/'),
+        None => false,
+    }
+}
+
 fn reject_preparation(
     call: &ToolInvocation,
     error: ApplicationError,
@@ -465,7 +521,10 @@ fn reject_preparation(
 }
 
 /// 把本次 run 的宿主事实投影为引擎无关的 JSON context。
-fn build_script_context_json(prompt_snapshot: &Value) -> Result<Value, ApplicationError> {
+fn build_script_context_json(
+    prompt_snapshot: &Value,
+    state: &BTreeMap<String, Vec<String>>,
+) -> Result<Value, ApplicationError> {
     let entries = prompt_snapshot
         .get("worldInfoActivation")
         .and_then(|batch| batch.get("entries"))
@@ -519,7 +578,162 @@ fn build_script_context_json(prompt_snapshot: &Value) -> Result<Value, Applicati
         "worldInfo": { "entries": world_info_entries },
         "variables": variables,
         "macro": macro_context,
+        // The shape the panel's condition scripts and the machine hooks already
+        // get: keys to values. A script reads state the way it is stored rather
+        // than by parsing the document file, which is what makes the file itself
+        // safe to withhold.
+        "state": state,
     }))
+}
+
+/// The chat's state as a script sees it.
+///
+/// A chat with no declaration, or one that has published nothing yet, reads as
+/// empty rather than failing the call: a script has to cope with a chat whose
+/// state has not started, and turning that into an error would make it every
+/// caller's problem.
+async fn read_script_state(
+    workspace_repository: &dyn WorkspaceRepository,
+    run_id: &str,
+    prompt_snapshot: &Value,
+) -> Result<BTreeMap<String, Vec<String>>, ApplicationError> {
+    let Ok(declaration) = declaration_from_snapshot(prompt_snapshot) else {
+        return Ok(BTreeMap::new());
+    };
+    let document = read_state_document(workspace_repository, run_id, &declaration).await?;
+    Ok(document.condition_fields())
+}
+
+/// Read a script's `stateWrites` into the request shape `state.update` takes.
+///
+/// Parsed here rather than shared with the machine hooks: those two functions
+/// are that module's own convention, and borrowing them would turn one module's
+/// private shape into a contract two modules have to keep in step.
+fn read_state_writes(entries: &[Value]) -> Result<StateUpdateRequest, Vec<String>> {
+    let mut fields = Vec::with_capacity(entries.len());
+    let mut problems = Vec::new();
+
+    for (index, entry) in entries.iter().enumerate() {
+        let Some(object) = entry.as_object() else {
+            problems.push(format!("stateWrites[{index}] must be an object"));
+            continue;
+        };
+        let key = object
+            .get("key")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if key.is_empty() {
+            problems.push(format!("stateWrites[{index}].key is required"));
+            continue;
+        }
+        let values = match object.get("values") {
+            None => Vec::new(),
+            Some(Value::Array(values)) => values
+                .iter()
+                .filter_map(|value| match value {
+                    Value::String(text) => Some(text.clone()),
+                    Value::Number(number) => Some(number.to_string()),
+                    Value::Bool(flag) => Some(flag.to_string()),
+                    _ => None,
+                })
+                .collect(),
+            Some(_) => {
+                problems.push(format!("stateWrites[{index}].values must be an array"));
+                continue;
+            }
+        };
+        fields.push((key, values));
+    }
+
+    if problems.is_empty() {
+        Ok(StateUpdateRequest {
+            fields,
+            remove: Vec::new(),
+        })
+    } else {
+        Err(problems)
+    }
+}
+
+fn join_update_errors(errors: &[StateUpdateError]) -> String {
+    errors
+        .iter()
+        .map(|error| format!("{error:?}"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Apply the state changes a script asked for, if it asked for any.
+///
+/// A script returns `{ stateWrites: [{ key, values }] }`, and the writes go
+/// through the same resolution, authorization and application `state.update`
+/// uses — so a write from a script is checked against the declaration and the
+/// profile's writable fields exactly as a model's own write is.
+///
+/// A refusal does not fail the call. It comes back as a line the model can read
+/// and correct, which is the bargain `state.update` already makes when it
+/// reports every bad key at once; failing here would hide the script's own
+/// return value behind a write it was only offering.
+async fn apply_state_writes(
+    workspace_repository: &dyn WorkspaceRepository,
+    run_id: &str,
+    prompt_snapshot: &Value,
+    value: &Value,
+) -> Result<Option<String>, ApplicationError> {
+    let Some(entries) = value.get("stateWrites").and_then(Value::as_array) else {
+        return Ok(None);
+    };
+    if entries.is_empty() {
+        return Ok(None);
+    }
+
+    let request = match read_state_writes(entries) {
+        Ok(request) => request,
+        Err(problems) => return Ok(Some(format!("stateWrites refused: {}", problems.join("; ")))),
+    };
+    let Ok(declaration) = declaration_from_snapshot(prompt_snapshot) else {
+        // No declaration means no key space to write into. That is a refusal to
+        // hand back, not a reason to fail a script that otherwise ran fine —
+        // the script's own return value is still worth reading.
+        return Ok(Some(
+            "stateWrites refused: this chat has no state declaration".to_string(),
+        ));
+    };
+    let resolved = match resolve_request(&declaration, &request) {
+        Ok(resolved) => resolved,
+        Err(errors) => {
+            return Ok(Some(format!(
+                "stateWrites refused: {}",
+                join_update_errors(&errors)
+            )));
+        }
+    };
+    let access = access_from_snapshot(prompt_snapshot)?;
+    if let Err(errors) = check_writable(&access, &declaration, &resolved) {
+        return Ok(Some(format!(
+            "stateWrites refused: {}",
+            join_update_errors(&errors)
+        )));
+    }
+
+    let document = read_state_document(workspace_repository, run_id, &declaration).await?;
+    let next = match apply_update(&document, &resolved) {
+        Ok(next) => next,
+        Err(errors) => {
+            return Ok(Some(format!(
+                "stateWrites refused: {}",
+                join_update_errors(&errors)
+            )));
+        }
+    };
+    write_state_document(workspace_repository, run_id, &next).await?;
+
+    Ok(Some(format!(
+        "stateWrites applied: {} field(s)",
+        resolved.fields.len()
+    )))
 }
 
 fn invalid_script_context(message: &str) -> ApplicationError {

@@ -17,6 +17,7 @@ pub mod provider_metadata_dto;
 pub mod searxng_search_dto;
 pub mod secret_dto;
 pub mod settings_dto;
+pub mod similharity_dto;
 pub mod sprite_dto;
 pub mod stable_diffusion_dto;
 pub mod theme_dto;

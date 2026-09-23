@@ -12,7 +12,7 @@ import { SlashCommandParserError } from '../../../slash-commands/SlashCommandPar
 import { SlashCommandScope } from '../../../slash-commands/SlashCommandScope.js';
 import { accountStorage } from '../../../util/AccountStorage.js';
 import { mountCodeMirrorEditor } from '../../../tauri/codemirror-editor.js';
-import { debounce, delay, getSortableDelay, showFontAwesomePicker } from '../../../utils.js';
+import { debounce, delay, escapeHtml, getSortableDelay, showFontAwesomePicker } from '../../../utils.js';
 import { log, quickReplyApi, warn } from '../index.js';
 import { QuickReplyContextLink } from './QuickReplyContextLink.js';
 import { QuickReplySet } from './QuickReplySet.js';
@@ -1761,15 +1761,16 @@ export class QuickReply {
             this.editorExecuteErrors.classList.add('qr--hasErrors');
             this.editorExecuteProgress.classList.add('qr--error');
             this.editorExecuteProgress.classList.remove('qr--paused');
+            // The parser error echoes the command source being parsed, so it is data here.
             if (ex instanceof SlashCommandParserError) {
                 this.editorExecuteErrors.innerHTML = `
-                    <div>${ex.message}</div>
+                    <div>${escapeHtml(ex.message)}</div>
                     <div>Line: ${ex.line} Column: ${ex.column}</div>
-                    <pre style="text-align:left;">${ex.hint}</pre>
+                    <pre style="text-align:left;">${escapeHtml(ex.hint)}</pre>
                 `;
             } else {
                 this.editorExecuteErrors.innerHTML = `
-                    <div>${ex.message}</div>
+                    <div>${escapeHtml(ex.message)}</div>
                 `;
             }
         }

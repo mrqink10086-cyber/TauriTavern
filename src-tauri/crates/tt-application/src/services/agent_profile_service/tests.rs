@@ -10,6 +10,7 @@ use tt_domain::models::agent::profile::{
     AgentContextPolicy, AgentModelBinding, AgentModelBindingMode, AgentPresetBindingMode,
     AgentPresetRef, AgentProfileDefinition, AgentProfileId, ResolvedAgentProfile,
 };
+use tt_domain::models::agent::profile::DEFAULT_AGENT_TOOL_UNFOLDED_TURNS;
 use tt_domain::models::preset::{DefaultPreset, Preset, PresetType};
 use tt_domain::models::tool::ToolId;
 use tt_ports::repositories::agent_profile_repository::AgentProfileRepository;
@@ -78,6 +79,7 @@ fn context_policy_normalizes_negative_history_window_to_full_history() {
     let mut policy = AgentContextPolicy {
         initial_chat_history_messages: -42,
         include_activated_world_info: true,
+        world_info: Default::default(),
     };
 
     super::validation::normalize_context_policy(&mut policy).expect("negative values normalize");
@@ -524,8 +526,9 @@ fn test_tool_policy(allow: &[&str]) -> tt_domain::models::agent::profile::Resolv
         max_rounds: 1,
         max_calls_per_run: 1,
         mcp_result_inline_char_limit: 50_000,
+        unfolded_tool_turns: DEFAULT_AGENT_TOOL_UNFOLDED_TURNS,
         max_calls_per_tool: Default::default(),
-    }
+        }
 }
 
 fn test_profile(agent_system_prompt: Option<&str>, presentation: &str) -> ResolvedAgentProfile {

@@ -30,7 +30,8 @@ async fn agent_runtime_executes_cached_mcp_tool_through_readable_alias() {
             ]),
         ],
     );
-    let (profile, mcp_tool_id) = configure_mcp_profile(&fixture, "mcp-writer", 3, 10_000).await;
+    let (profile, mcp_tool_id) =
+        configure_mcp_profile(&fixture, "mcp-writer", 3, 10_000, McpToolPermission::Allow).await;
     let mcp_tool = tt_domain::models::tool::ToolId::parse(&mcp_tool_id).unwrap();
     let registration_id =
         tt_domain::models::mcp::McpRegistrationId::from_provider_id(mcp_tool.provider_id())
@@ -199,7 +200,9 @@ async fn agent_runtime_stops_after_unknown_mcp_call_outcome() {
             code: "mcp.response_too_large".to_string(),
             message: "response exceeded the wire limit".to_string(),
         }));
-    let (profile, _) = configure_mcp_profile(&fixture, "mcp-unknown-writer", 1, 50_000).await;
+    let (profile, _) =
+        configure_mcp_profile(&fixture, "mcp-unknown-writer", 1, 50_000, McpToolPermission::Allow)
+            .await;
 
     let handle = start_contract_agent_run(
         &fixture,
@@ -251,11 +254,75 @@ async fn agent_runtime_stops_after_unknown_mcp_call_outcome() {
     let _ = fs::remove_dir_all(root).await;
 }
 
+#[tokio::test]
+async fn agent_runtime_refuses_a_tool_that_asks_for_approval() {
+    // `Ask` promises an approval step that does not exist yet. Running the call
+    // anyway would make the setting meaningless, so it is refused with a reason
+    // the model can act on.
+    let root = temp_root("agent-mcp-ask-permission");
+    let fixture = agent_runtime_fixture_with_responses(
+        &root,
+        vec![
+            model_tool_response(vec![model_tool_call(
+                "call_mcp",
+                "mcp__my_server__issue_create",
+                json!({ "title": "Needs approval" }),
+            )]),
+            model_tool_response(vec![model_tool_call(
+                "call_finish",
+                "workspace_finish",
+                json!({}),
+            )]),
+        ],
+    );
+    let (profile, _) = configure_mcp_profile(
+        &fixture,
+        "mcp-ask-writer",
+        2,
+        10_000,
+        McpToolPermission::Ask,
+    )
+    .await;
+
+    let handle = start_contract_agent_run(
+        &fixture,
+        &profile,
+        AgentRunPresentation::Background,
+        "mcp-ask-permission",
+        Some(false),
+    )
+    .await;
+    wait_for_terminal_agent_run(&fixture.agent_repository, &handle.run_id).await;
+
+    assert!(
+        fixture.mcp_gateway.calls.lock().await.is_empty(),
+        "a tool set to Ask must not reach the server"
+    );
+    let requests = fixture.model_gateway.requests().await;
+    let refusal = requests[1]
+        .messages
+        .iter()
+        .flat_map(|message| message.parts.iter())
+        .find_map(|part| match part {
+            AgentModelContentPart::ToolResult { result } => Some(result),
+            _ => None,
+        })
+        .expect("the refusal reaches the model");
+    assert!(refusal.is_error);
+    assert_eq!(
+        refusal.error_code.as_deref(),
+        Some("mcp.call_permission_requires_approval")
+    );
+
+    let _ = fs::remove_dir_all(root).await;
+}
+
 pub(super) async fn configure_mcp_profile(
     fixture: &AgentRuntimeFixture,
     profile_id: &str,
     max_rounds: usize,
     mcp_result_inline_char_limit: usize,
+    permission: McpToolPermission,
 ) -> (
     tt_domain::models::agent::profile::ResolvedAgentProfile,
     String,
@@ -282,11 +349,7 @@ pub(super) async fn configure_mcp_profile(
         .unwrap();
     fixture
         .mcp_service
-        .set_tool_permission(
-            &server.id,
-            "issue.create".to_string(),
-            McpToolPermission::Ask,
-        )
+        .set_tool_permission(&server.id, "issue.create".to_string(), permission)
         .await
         .unwrap();
 

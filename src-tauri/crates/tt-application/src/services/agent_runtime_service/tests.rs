@@ -12,6 +12,7 @@ use tt_domain::models::agent::profile::{
     AgentRunPolicy, AgentSkillPolicy, AgentToolPolicy, AgentWorkspacePolicy,
     ResolvedAgentOutputPolicy, ResolvedAgentProfile,
 };
+use tt_domain::models::agent::profile::DEFAULT_AGENT_TOOL_UNFOLDED_TURNS;
 use tt_domain::models::agent::{
     AgentChatCommitMode, AgentChatRef, AgentRunPresentation, AgentRunSkillScopeRefs, ArtifactSpec,
     ArtifactTarget, WorkspacePath,
@@ -163,6 +164,7 @@ fn resolved_profile(preset: AgentPresetBinding) -> ResolvedAgentProfile {
             max_rounds: 1,
             max_calls_per_run: 1,
             mcp_result_inline_char_limit: 50_000,
+            unfolded_tool_turns: DEFAULT_AGENT_TOOL_UNFOLDED_TURNS,
             max_calls_per_tool: Default::default(),
         },
         skills: AgentSkillPolicy {
@@ -192,6 +194,8 @@ fn resolved_profile(preset: AgentPresetBinding) -> ResolvedAgentProfile {
             message_body_artifact_id: "main".to_string(),
             message_body_path: "output/main.md".to_string(),
         },
+        state_access: Default::default(),
+        recall: Default::default(),
         source_trace: AgentProfileSourceTrace {
             profile_source: "test".to_string(),
         },

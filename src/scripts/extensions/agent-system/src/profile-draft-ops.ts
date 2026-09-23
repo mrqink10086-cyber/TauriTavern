@@ -10,6 +10,7 @@ import {
     CHAT_COMPLETION_PRESET_API_ID,
 } from './AgentSystemPanelContract';
 import { normalizeDelegationToolAllowList, normalizeProfileId, type AgentProfileDraft } from './profile-model';
+import { DEFAULT_STATE_ACCESS_DEPTH, type StateAccessRow } from './profile-state-access';
 
 export type AgentPresentationMemory = Record<string, TauriTavernAgentRunPresentation>;
 
@@ -308,6 +309,54 @@ export function applyWorkspaceRootWritable(draft: AgentProfileDraft, root: strin
     draft.workspace.writableRoots = writable
         ? [...current, root]
         : current.filter((item) => item !== root);
+}
+
+/**
+ * The rows the grid shows.
+ *
+ * A profile with no policy and a profile with an empty policy mean the same
+ * thing — nothing granted yet — so both read as "no rows".
+ */
+export function stateAccessRows(draft: AgentProfileDraft): StateAccessRow[] {
+    return draft.stateAccess?.entries ?? [];
+}
+
+export function applyAddStateAccessRow(draft: AgentProfileDraft, pattern = ''): void {
+    const rows = stateAccessRows(draft);
+    rows.push({
+        pattern,
+        inject: false,
+        visible: false,
+        writable: false,
+        injectSlot: 'atDepth',
+        injectDepth: DEFAULT_STATE_ACCESS_DEPTH,
+    });
+    draft.stateAccess = { entries: rows };
+}
+
+/** Add one row per pattern, so a pasted list of keys becomes editable rows. */
+export function applyAddStateAccessRows(draft: AgentProfileDraft, patterns: readonly string[]): void {
+    for (const pattern of patterns) {
+        applyAddStateAccessRow(draft, pattern);
+    }
+}
+
+export function applyRemoveStateAccessRow(draft: AgentProfileDraft, index: number): void {
+    draft.stateAccess = {
+        entries: stateAccessRows(draft).filter((_, position) => position !== index),
+    };
+}
+
+export function applyUpdateStateAccessRow(
+    draft: AgentProfileDraft,
+    index: number,
+    patch: Partial<StateAccessRow>,
+): void {
+    draft.stateAccess = {
+        entries: stateAccessRows(draft).map((row, position) => (
+            position === index ? { ...row, ...patch } : row
+        )),
+    };
 }
 
 export function nextProfileId(profiles: readonly { id: string }[], base: string): string {

@@ -62,6 +62,7 @@ import {
     createThumbnail,
     delay,
     download,
+    escapeHtml,
     getAudioDurationFromDataURL,
     getBase64Async,
     getFileText,
@@ -2843,7 +2844,7 @@ function getOpenRouterModelTemplate(option) {
 
     return $((`
         <div class="flex-container flexFlowColumn" title="${DOMPurify.sanitize(model.id)}">
-            <div><strong>${DOMPurify.sanitize(model.name)}</strong> | ${model.context_length} ctx | <small>${price}</small></div>
+            <div><strong>${DOMPurify.sanitize(model.name)}</strong> | ${escapeHtml(model.context_length)} ctx | <small>${price}</small></div>
         </div>
     `));
 }
@@ -2962,7 +2963,7 @@ function getChutesModelTemplate(option) {
 
     return $((`
         <div class="flex-container alignItemsBaseline" title="${DOMPurify.sanitize(model.id)}">
-            <strong>${DOMPurify.sanitize(model.id)}</strong> | ${contextLength} ctx | <small>${price}</small>${capabilities}
+            <strong>${DOMPurify.sanitize(model.id)}</strong> | ${escapeHtml(contextLength)} ctx | <small>${escapeHtml(price)}</small>${capabilities}
         </div>
     `));
 }
@@ -2991,7 +2992,7 @@ function getNanoGptModelTemplate(option) {
 
     return $((`
         <div class="flex-container alignItemsBaseline" title="${DOMPurify.sanitize(model.id)}">
-            <strong>${DOMPurify.sanitize(model.id)}</strong> | ${contextLength} ctx | <small>${price}</small>
+            <strong>${DOMPurify.sanitize(model.id)}</strong> | ${escapeHtml(contextLength)} ctx | <small>${escapeHtml(price)}</small>
         </div>
     `));
 }
@@ -3869,7 +3870,7 @@ function appendOpenRouterOptions(model_list, groupModels = false, sort = false) 
 
     if (groupModels) {
         model_list.forEach((models, vendor) => {
-            const optgroup = $(`<optgroup label="${vendor}">`);
+            const optgroup = $(`<optgroup label="${escapeHtml(vendor)}">`);
 
             models.forEach((model) => {
                 appendOption(model, optgroup);
@@ -4025,7 +4026,7 @@ function getAimlapiModelTemplate(option) {
         return option.text;
     }
 
-    const vendor = model.id.split('/')[0];
+    const vendor = escapeHtml(model.id.split('/')[0]);
 
     return $((`
         <div class="flex-container flexFlowColumn" title="${DOMPurify.sanitize(model.id)}">

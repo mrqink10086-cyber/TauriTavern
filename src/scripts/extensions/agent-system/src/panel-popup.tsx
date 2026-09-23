@@ -6,6 +6,31 @@ import { createAgentSystemPanelController } from './AgentSystemPanelController';
 import { CHAT_COMPLETION_PRESET_API_ID } from './AgentSystemPanelContract';
 import { createRunHistoryController, type RunHistoryListInput } from './RunHistoryController';
 import { createRunRetentionController } from './RunRetentionController';
+import { readStateBinding, toggleStateBinding } from './state-binding';
+import {
+    deleteStateDeclaration,
+    getStateDeclaration,
+    listStateDeclarations,
+    saveStateDeclaration,
+} from './state-config-api';
+import { createStateConfigController } from './state-config-controller';
+import {
+    deleteStateMachine,
+    evaluateStateMachine,
+    getStateMachine,
+    listStateMachines,
+    saveStateMachine,
+} from './state-machine-api';
+import { createMachineConfigController } from './state-machine-controller';
+import {
+    deleteStatePredicateSet,
+    evaluateStatePredicateSet,
+    getStatePredicateSet,
+    listStatePredicateSets,
+    saveStatePredicateSet,
+} from './state-predicate-api';
+import { createPredicateConfigController } from './state-predicate-controller';
+import { resolveChatStateDeclaration } from './chat-state-declaration';
 import {
     confirmAction,
     errorText,
@@ -26,8 +51,30 @@ import { downloadBlobWithRuntime } from '../../../file-export.js';
 import { subscribeAgentProfilesChanged } from '../../../tauritavern/agent/agent-profile-events.js';
 import { subscribeLlmConnectionsChanged } from '../../../tauritavern/agent/llm-connection-events.js';
 import { resumeAgentRun } from '../../../tauritavern/agent/agent-run-retry.js';
+import { isTauriEnv, openDialog } from '../../../../tauri-bridge.js';
 
 let activePanel: HTMLDialogElement | null = null;
+
+/**
+ * The host's own file dialog, when there is one.
+ *
+ * A plain browser has no dialog that returns a path, and a path is the only
+ * thing the backend can count tokens with, so this reports "no dialog" rather
+ * than handing back a file it cannot name.
+ */
+function hostPickFilePath(): ((extensions: readonly string[]) => Promise<string | null>) | null {
+    if (!isTauriEnv) {
+        return null;
+    }
+    return async (extensions) => {
+        const selected: unknown = await openDialog({
+            multiple: false,
+            directory: false,
+            filters: [{ name: 'File', extensions: [...extensions] }],
+        });
+        return typeof selected === 'string' && selected.trim() ? selected : null;
+    };
+}
 
 type SillyTavernPresetManager = {
     getAllPresets: () => string[];
@@ -135,6 +182,57 @@ export function openAgentSystemPanel(): void {
         tr,
     });
 
+    const stateConfig = createStateConfigController({
+        listDeclarations: listStateDeclarations,
+        getDeclaration: getStateDeclaration,
+        saveDeclaration: saveStateDeclaration,
+        deleteDeclaration: deleteStateDeclaration,
+        confirmAction,
+        notifyError: reportAgentSystemError,
+        notifySuccess: (message) => window.toastr?.success?.(message, tr('agentSystem')),
+        downloadBlob: (blob, fileName) => downloadBlobWithRuntime(blob, fileName, {
+            fallbackName: fileName,
+        }),
+        pickFilePath: hostPickFilePath(),
+        readBinding: () => readStateBinding('declaration'),
+        toggleBinding: (scope, name) => toggleStateBinding('declaration', scope, name),
+        tr,
+    });
+
+    const machineConfig = createMachineConfigController({
+        listMachines: listStateMachines,
+        getMachine: getStateMachine,
+        saveMachine: saveStateMachine,
+        deleteMachine: deleteStateMachine,
+        evaluate: evaluateStateMachine,
+        confirmAction,
+        notifyError: reportAgentSystemError,
+        notifySuccess: (message) => window.toastr?.success?.(message, tr('agentSystem')),
+        downloadBlob: (blob, fileName) => downloadBlobWithRuntime(blob, fileName, {
+            fallbackName: fileName,
+        }),
+        readBinding: () => readStateBinding('machine'),
+        toggleBinding: (scope, name) => toggleStateBinding('machine', scope, name),
+        tr,
+    });
+
+    const predicateConfig = createPredicateConfigController({
+        listSets: listStatePredicateSets,
+        getSet: getStatePredicateSet,
+        saveSet: saveStatePredicateSet,
+        deleteSet: deleteStatePredicateSet,
+        evaluate: evaluateStatePredicateSet,
+        confirmAction,
+        notifyError: reportAgentSystemError,
+        notifySuccess: (message) => window.toastr?.success?.(message, tr('agentSystem')),
+        downloadBlob: (blob, fileName) => downloadBlobWithRuntime(blob, fileName, {
+            fallbackName: fileName,
+        }),
+        readBinding: () => readStateBinding('predicates'),
+        toggleBinding: (scope, name) => toggleStateBinding('predicates', scope, name),
+        tr,
+    });
+
     const controller = createAgentSystemPanelController({
         loadSettings,
         patchSettings,
@@ -152,6 +250,9 @@ export function openAgentSystemPanel(): void {
         },
         listPresetOptions,
         listModelTargets: listSavedModelTargets,
+        listStateDeclarations: () => listStateDeclarations(),
+        loadStateDeclaration: (name) => getStateDeclaration(name),
+        resolveChatStateDeclaration,
         saveModelTargetConnection: saveModelTargetAsLlmConnection,
         subscribeProfilesChanged: subscribeAgentProfilesChanged,
         subscribeModelTargetsChanged: subscribeModelTargetChanges,
@@ -167,6 +268,15 @@ export function openAgentSystemPanel(): void {
             void runHistory.refresh();
             void runRetention.refresh();
         },
+        onStateTabActivated: () => {
+            void stateConfig.init();
+        },
+        onMachinesTabActivated: () => {
+            void machineConfig.init();
+        },
+        onPredicatesTabActivated: () => {
+            void predicateConfig.init();
+        },
         tr,
     });
 
@@ -178,6 +288,8 @@ export function openAgentSystemPanel(): void {
         }
         disposed = true;
         controller.dispose();
+        stateConfig.dispose();
+        machineConfig.dispose();
         runHistory.dispose();
         runRetention.dispose();
         root.unmount();
@@ -186,10 +298,33 @@ export function openAgentSystemPanel(): void {
             activePanel = null;
         }
     };
+    // Closing is the last chance to keep unsaved work, and no other path asks.
+    let closing = false;
+    const requestClose = () => {
+        if (closing) {
+            return;
+        }
+        closing = true;
+        void (async () => {
+            try {
+                const answers = await Promise.all([
+                    stateConfig.confirmPendingEdits(),
+                    machineConfig.confirmPendingEdits(),
+                    predicateConfig.confirmPendingEdits(),
+                ]);
+                if (answers.every(Boolean) && !disposed) {
+                    dialog.close();
+                }
+            } finally {
+                closing = false;
+            }
+        })();
+    };
+
     dialog.addEventListener('close', cleanup, { once: true });
     dialog.addEventListener('cancel', (event) => {
         event.preventDefault();
-        dialog.close();
+        requestClose();
     });
 
     root.render(
@@ -198,8 +333,11 @@ export function openAgentSystemPanel(): void {
                 controller={controller}
                 runHistory={runHistory}
                 runRetention={runRetention}
+                stateConfig={stateConfig}
+                machineConfig={machineConfig}
+                predicateConfig={predicateConfig}
                 tr={tr}
-                onRequestClose={() => dialog.close()}
+                onRequestClose={requestClose}
             />
         </StrictMode>,
     );

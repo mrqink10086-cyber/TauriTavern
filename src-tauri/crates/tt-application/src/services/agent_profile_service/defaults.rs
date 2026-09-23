@@ -11,6 +11,7 @@ use tt_domain::models::agent::profile::{
     AgentWorkspacePolicy, DEFAULT_AGENT_MCP_RESULT_INLINE_CHAR_LIMIT, DEFAULT_AGENT_PROFILE_ID,
     DEFAULT_AGENT_SKILL_MAX_READ_CHARS_PER_CALL, DEFAULT_AGENT_SKILL_MAX_READ_CHARS_PER_RUN,
     DEFAULT_AGENT_TOOL_MAX_CALLS_PER_RUN, DEFAULT_AGENT_TOOL_MAX_ROUNDS,
+    DEFAULT_AGENT_TOOL_UNFOLDED_TURNS,
 };
 use tt_domain::models::tool::ToolId;
 
@@ -62,6 +63,8 @@ pub(super) fn default_writer_profile() -> Result<AgentProfileDefinition, Applica
                 "skill.search",
                 "skill.read",
                 "skill.run_script",
+                "state.update",
+                "state.transition",
                 "workspace.list_files",
                 "workspace.search_files",
                 "workspace.read_file",
@@ -82,6 +85,7 @@ pub(super) fn default_writer_profile() -> Result<AgentProfileDefinition, Applica
             max_rounds: DEFAULT_AGENT_TOOL_MAX_ROUNDS,
             max_calls_per_run: DEFAULT_AGENT_TOOL_MAX_CALLS_PER_RUN,
             mcp_result_inline_char_limit: DEFAULT_AGENT_MCP_RESULT_INLINE_CHAR_LIMIT,
+            unfolded_tool_turns: DEFAULT_AGENT_TOOL_UNFOLDED_TURNS,
             max_calls_per_tool: BTreeMap::new(),
         },
         skills: AgentSkillPolicy {
@@ -100,6 +104,10 @@ pub(super) fn default_writer_profile() -> Result<AgentProfileDefinition, Applica
                 .map(|root| root.to_string())
                 .collect(),
         },
+        // Unconfigured on purpose: an empty policy constrains nothing, so the
+        // default profile keeps working until the user configures access.
+        state_access: Default::default(),
+        recall: Default::default(),
         plan: AgentPlanPolicy {
             mode: AgentPlanMode::None,
             beta: DEFAULT_AGENT_PLAN_BETA,

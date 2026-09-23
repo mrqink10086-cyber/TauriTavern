@@ -2534,7 +2534,7 @@ export function highlightRegex(regexStr) {
  * @param {object} options - Optional parameters
  * @param {boolean} [options.interactive=false] - Whether to show a confirmation dialog when needing to overwrite an existing data object
  * @param {string} [options.actionName='overwrite'] - The action name to display in the confirmation dialog
- * @param {(existingName:string)=>void|Promise<void>} [options.deleteAction=null] - Optional action to execute wen deleting an existing data object on overwrite
+ * @param {(existingName:string)=>void|Promise<unknown>} [options.deleteAction=null] - Optional action to execute when deleting an existing data object on overwrite; whatever it resolves to is discarded
  * @returns {Promise<boolean>} True if the user confirmed the overwrite or there is no overwrite needed, false otherwise
  */
 export async function checkOverwriteExistingData(type, existingNames, name, { interactive = false, actionName = 'Overwrite', deleteAction = null } = {}) {
@@ -2543,13 +2543,17 @@ export async function checkOverwriteExistingData(type, existingNames, name, { in
         return true;
     }
 
-    const overwrite = interactive && await Popup.show.confirm(`${type} ${actionName}`, `<p>A ${type.toLowerCase()} with the same name already exists:<br />${existing}</p>Do you want to overwrite it?`);
+    // The existing name is data (a character/world name), but every branch below renders
+    // it as HTML: the popup content, and the toasts which opt out of toastr's escaping.
+    const existingHtml = escapeHtml(existing);
+
+    const overwrite = interactive && await Popup.show.confirm(`${type} ${actionName}`, `<p>A ${type.toLowerCase()} with the same name already exists:<br />${existingHtml}</p>Do you want to overwrite it?`);
     if (!overwrite) {
-        toastr.warning(`${type} ${actionName.toLowerCase()} cancelled. A ${type.toLowerCase()} with the same name already exists:<br />${existing}`, `${type} ${actionName}`, { escapeHtml: false });
+        toastr.warning(`${type} ${actionName.toLowerCase()} cancelled. A ${type.toLowerCase()} with the same name already exists:<br />${existingHtml}`, `${type} ${actionName}`, { escapeHtml: false });
         return false;
     }
 
-    toastr.info(`Overwriting Existing ${type}:<br />${existing}`, `${type} ${actionName}`, { escapeHtml: false });
+    toastr.info(`Overwriting Existing ${type}:<br />${existingHtml}`, `${type} ${actionName}`, { escapeHtml: false });
 
     // If there is an action to delete the existing data, do it, as the name might be slightly different so file name would not be the same
     if (deleteAction) {

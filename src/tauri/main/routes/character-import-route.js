@@ -3,7 +3,7 @@ import { badRequestBody, isNotFoundError } from './character-route-utils.js';
 
 /**
  * @param {any} character
- * @param {'agentProfiles' | 'skills'} field
+ * @param {'agentProfiles' | 'skills' | 'stateDeclarations' | 'stateMachines' | 'statePredicates'} field
  */
 function hasCharacterEmbeddedAgentAsset(character, field) {
     const sources = [
@@ -86,6 +86,9 @@ export function registerCharacterImportRoute(router, context, { jsonResponse }) 
             post_import: {
                 has_agent_profiles: hasCharacterEmbeddedAgentAsset(normalized, 'agentProfiles'),
                 has_agent_skills: hasCharacterEmbeddedAgentAsset(normalized, 'skills'),
+                has_state_declarations: hasCharacterEmbeddedAgentAsset(normalized, 'stateDeclarations'),
+                has_state_machines: hasCharacterEmbeddedAgentAsset(normalized, 'stateMachines'),
+                has_state_predicates: hasCharacterEmbeddedAgentAsset(normalized, 'statePredicates'),
             },
         });
     });

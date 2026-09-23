@@ -22,7 +22,9 @@ import {
     type AgentProfileEditMode,
     type AgentProfileSectionId,
     type AgentSystemPanelControllerDeps,
+    type AgentSystemPanelSession,
     type AgentSystemPanelSnapshot,
+    type AgentSystemPanelTabId,
 } from './AgentSystemPanelContract';
 import { isProfileRuntimeStateCurrent } from './AgentSystemPanelView';
 import {
@@ -36,21 +38,24 @@ import {
 } from './AgentSystemPanelPersistence';
 import type { AgentSystemSettings } from './settings-store';
 
-export type AgentSystemPanelSession = {
-    getSnapshot: () => AgentSystemPanelSnapshot;
-    subscribe: (listener: () => void) => () => void;
-    init: () => Promise<void>;
-    dispose: () => void;
-    setActiveProfile: (profileId: string) => Promise<void>;
-    setTab: (tab: string) => Promise<void>;
-    selectProfile: (profileId: string) => Promise<void>;
-    setProfileEditMode: (mode: AgentProfileEditMode) => void;
-    scrollToProfileSection: (sectionId: AgentProfileSectionId) => void;
-};
-
 export type AgentSystemPanelController = AgentSystemPanelSession
     & AgentSystemDraftEditor
     & Omit<AgentSystemPanelPersistence, 'refreshProfiles'>;
+
+/** Which lazy editor a tab owns, and the hook that wakes it up. */
+const TAB_ACTIVATIONS: Readonly<Record<AgentSystemPanelTabId, (deps: AgentSystemPanelControllerDeps) => void>> = Object.freeze({
+    profiles: () => undefined,
+    runs: (deps) => deps.onRunsTabActivated(),
+    state: (deps) => deps.onStateTabActivated(),
+    machines: (deps) => deps.onMachinesTabActivated(),
+    predicates: (deps) => deps.onPredicatesTabActivated(),
+});
+
+function activateTab(deps: AgentSystemPanelControllerDeps, tab: string): void {
+    // A tab id comes out of persisted settings, so it is resolved by lookup:
+    // an unknown value simply wakes nothing up.
+    TAB_ACTIVATIONS[tab as AgentSystemPanelTabId]?.(deps);
+}
 
 /** Mount-local panel state; dispose blocks every late completion and subscription. */
 export function createAgentSystemPanelController(deps: AgentSystemPanelControllerDeps): AgentSystemPanelController {
@@ -148,19 +153,13 @@ export function createAgentSystemPanelController(deps: AgentSystemPanelControlle
     }
 
     function seedMainAgentPresentation(draft: AgentProfileDraft): void {
-        rememberMainAgentPresentation(
-            mainAgentPresentationByProfileId,
-            profilePresentationMemoryKey(draft.id, snapshot.editingProfileId),
-            draft.run.presentation || 'foreground',
-        );
+        const memoryKey = profilePresentationMemoryKey(draft.id, snapshot.editingProfileId);
+        rememberMainAgentPresentation(mainAgentPresentationByProfileId, memoryKey, draft.run.presentation || 'foreground');
     }
 
     function editModeSyncPatch(draft: AgentProfileDraft): Pick<AgentSystemPanelSnapshot, 'profileEditMode' | 'activeProfileSectionId'> {
         const profileEditMode = preferredProfileEditMode(draft);
-        return {
-            profileEditMode,
-            activeProfileSectionId: firstProfileSectionIdForMode(profileEditMode),
-        };
+        return { profileEditMode, activeProfileSectionId: firstProfileSectionIdForMode(profileEditMode) };
     }
 
     function clearedRuntimeState(): Pick<AgentSystemPanelSnapshot,
@@ -215,6 +214,12 @@ export function createAgentSystemPanelController(deps: AgentSystemPanelControlle
 
     function refreshModelTargets(): void {
         patch({ modelTargets: deps.listModelTargets() });
+    }
+
+    async function refreshStateDeclarations(): Promise<void> {
+        const names = await deps.listStateDeclarations();
+        const choice = names.includes(snapshot.stateDeclarationChoice) ? snapshot.stateDeclarationChoice : (names[0] ?? '');
+        patch({ stateDeclarationNames: names, stateDeclarationChoice: choice });
     }
 
     async function loadSupplemental(operation: () => void | Promise<void>): Promise<void> {
@@ -408,13 +413,12 @@ export function createAgentSystemPanelController(deps: AgentSystemPanelControlle
                     runEventTask(handleLlmConnectionsChanged);
                 }));
                 patch({ initialized: true });
-                if (snapshot.settings.activeTab === 'runs') {
-                    deps.onRunsTabActivated();
-                }
+                activateTab(deps, snapshot.settings.activeTab);
                 await Promise.all([
                     loadSupplemental(refreshPresetOptions),
                     loadSupplemental(refreshModelTargets),
                     loadSupplemental(refreshToolCatalog),
+                    loadSupplemental(refreshStateDeclarations),
                 ]);
             } catch (error) {
                 unsubscribeAll();
@@ -467,8 +471,8 @@ export function createAgentSystemPanelController(deps: AgentSystemPanelControlle
                 if (disposed) {
                     return;
                 }
-                if (tab === 'runs' && previousTab !== 'runs') {
-                    deps.onRunsTabActivated();
+                if (tab !== previousTab) {
+                    activateTab(deps, tab);
                 }
             });
         },
@@ -484,6 +488,9 @@ export function createAgentSystemPanelController(deps: AgentSystemPanelControlle
                 activeProfileSectionId: sectionId,
                 profileSectionScrollRequest: snapshot.profileSectionScrollRequest + 1,
             });
+        },
+        setStateDeclarationChoice(name: string) {
+            patch({ stateDeclarationChoice: name });
         },
         ...draftEditor,
         saveProfile: () => execute(persistence.saveProfile),

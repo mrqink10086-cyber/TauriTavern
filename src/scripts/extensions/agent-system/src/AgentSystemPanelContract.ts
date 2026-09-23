@@ -9,6 +9,8 @@ import type { AgentSystemMessageKey, AgentSystemTr } from './i18n';
 import { defaultProfile, profileForEdit, type AgentProfileDraft } from './profile-model';
 import type { AgentModelTarget } from './model-target-connection';
 import type { AgentSystemSettings } from './settings-store';
+import type { ChatStateDeclaration } from './chat-state-declaration';
+import type { StateDeclaration } from './state-config-model';
 
 export const PROFILE_EXPORT_CONTENT_TYPE = 'application/json';
 export const CHAT_COMPLETION_PRESET_API_ID = 'openai';
@@ -33,14 +35,20 @@ export type AgentProfileSectionId =
     | 'tools'
     | 'skills'
     | 'workspace'
+    | 'state-access'
+    | 'recall'
+    | 'world-info'
     | 'output'
     | 'json';
 
-export type AgentSystemPanelTabId = 'profiles' | 'runs';
+export type AgentSystemPanelTabId = 'profiles' | 'runs' | 'state' | 'machines' | 'predicates';
 
 export const PANEL_TABS: ReadonlyArray<{ id: AgentSystemPanelTabId; labelKey: AgentSystemMessageKey; icon: string }> = Object.freeze([
     { id: 'profiles', labelKey: 'profiles', icon: 'fa-id-card-clip' },
     { id: 'runs', labelKey: 'runs', icon: 'fa-clock-rotate-left' },
+    { id: 'state', labelKey: 'stateDeclarations', icon: 'fa-clipboard-list' },
+    { id: 'machines', labelKey: 'stateMachineTab', icon: 'fa-diagram-project' },
+    { id: 'predicates', labelKey: 'statePredicatesTab', icon: 'fa-filter' },
 ]);
 
 export const PROFILE_EDIT_MODES: ReadonlyArray<{ id: AgentProfileEditMode; labelKey: AgentSystemMessageKey; icon: string }> = Object.freeze([
@@ -66,6 +74,9 @@ const PROFILE_SECTIONS: readonly AgentProfileSection[] = Object.freeze([
     { id: 'tools', labelKey: 'capabilityMatrix', icon: 'fa-screwdriver-wrench', modes: ['main', 'subagent'] },
     { id: 'skills', labelKey: 'skillAccess', icon: 'fa-book', modes: ['main', 'subagent'] },
     { id: 'workspace', labelKey: 'workspaceAccess', icon: 'fa-folder-tree', modes: ['main', 'subagent'] },
+    { id: 'state-access', labelKey: 'stateAccess', icon: 'fa-clipboard-list', modes: ['main', 'subagent'] },
+    { id: 'recall', labelKey: 'recall', icon: 'fa-brain', modes: ['main', 'subagent'] },
+    { id: 'world-info', labelKey: 'worldInfoAccess', icon: 'fa-book-open', modes: ['main', 'subagent'] },
     { id: 'output', labelKey: 'outputArtifact', icon: 'fa-file-lines', modes: ['main'] },
     { id: 'json', labelKey: 'advancedJson', icon: 'fa-code', modes: ['main', 'subagent'] },
 ]);
@@ -123,6 +134,12 @@ export const TOOL_GROUPS: readonly AgentToolGroup[] = Object.freeze([
         tools: ['builtin:workspace.commit', 'builtin:workspace.finish'],
     },
     {
+        id: 'state',
+        labelKey: 'stateTools',
+        icon: 'fa-clipboard-list',
+        tools: ['builtin:state.update'],
+    },
+    {
         id: 'other',
         labelKey: 'otherTools',
         icon: 'fa-dice',
@@ -136,6 +153,7 @@ const WORKSPACE_ROOT_ICONS: Readonly<Record<string, string>> = Object.freeze({
     plan: 'fa-list-check',
     summaries: 'fa-layer-group',
     persist: 'fa-database',
+    state: 'fa-clipboard-list',
 });
 
 export function workspaceRootIcon(root: string): string {
@@ -230,6 +248,11 @@ export type AgentSystemPanelSnapshot = {
     selectedToolId: string;
     presetOptions: string[];
     modelTargets: AgentModelTarget[];
+    // Saved state declarations the access grid can be expanded from.
+    stateDeclarationNames: string[];
+    stateDeclarationChoice: string;
+    // The name of the chat-bound declaration the grid was last expanded from.
+    chatDeclarationName: string;
 };
 
 export type AgentSystemPanelControllerDeps = {
@@ -246,6 +269,11 @@ export type AgentSystemPanelControllerDeps = {
     }>;
     listPresetOptions: () => string[];
     listModelTargets: () => AgentModelTarget[];
+    // Saved state declarations, for expanding an access grid from them.
+    listStateDeclarations: () => Promise<string[]>;
+    loadStateDeclaration: (name: string) => Promise<StateDeclaration>;
+    // The declaration bound to the current chat, or null when none resolves.
+    resolveChatStateDeclaration: () => Promise<ChatStateDeclaration | null>;
     saveModelTargetConnection: (target: AgentModelTarget) => Promise<unknown>;
     subscribeProfilesChanged: (listener: () => void) => () => void;
     subscribeModelTargetsChanged: (listener: () => void) => () => void;
@@ -257,7 +285,27 @@ export type AgentSystemPanelControllerDeps = {
     notifySuccess: (message: string) => void;
     // Fired when the runs tab becomes visible (init or tab switch).
     onRunsTabActivated: () => void;
+    // Fired when the state declaration tab becomes visible (init or tab switch).
+    onStateTabActivated: () => void;
+    // Fired when the state machine tab becomes visible (init or tab switch).
+    onMachinesTabActivated: () => void;
+    // Fired when the predicate set tab becomes visible (init or tab switch).
+    onPredicatesTabActivated: () => void;
     tr: Tr;
+};
+
+/** The session half of the panel controller: store-independent lifecycle and view state. */
+export type AgentSystemPanelSession = {
+    getSnapshot: () => AgentSystemPanelSnapshot;
+    subscribe: (listener: () => void) => () => void;
+    init: () => Promise<void>;
+    dispose: () => void;
+    setActiveProfile: (profileId: string) => Promise<void>;
+    setTab: (tab: string) => Promise<void>;
+    selectProfile: (profileId: string) => Promise<void>;
+    setProfileEditMode: (mode: AgentProfileEditMode) => void;
+    scrollToProfileSection: (sectionId: AgentProfileSectionId) => void;
+    setStateDeclarationChoice: (name: string) => void;
 };
 
 export function createInitialPanelSnapshot(): AgentSystemPanelSnapshot {
@@ -295,5 +343,8 @@ export function createInitialPanelSnapshot(): AgentSystemPanelSnapshot {
         selectedToolId: FIRST_KNOWN_TOOL_ID,
         presetOptions: [],
         modelTargets: [],
+        stateDeclarationNames: [],
+        stateDeclarationChoice: '',
+        chatDeclarationName: '',
     };
 }

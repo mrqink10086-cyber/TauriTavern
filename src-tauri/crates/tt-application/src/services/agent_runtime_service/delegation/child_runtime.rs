@@ -22,7 +22,15 @@ use crate::services::agent_runtime_service::tool_snapshot::tool_snapshot_summary
 use crate::services::agent_runtime_service::{
     AgentCancelReceiver, AgentRuntimeService, PreparedInvocation,
 };
-use tt_domain::models::agent::profile::{AgentPresetBindingMode, ResolvedAgentProfile};
+use crate::services::agent_runtime_service::recall::{
+    inherit_recall_message, insert_system_message_after_prompt, recall_block_texts,
+};
+use crate::services::agent_runtime_service::world_info::{
+    activated_entries, entries_for_subagent, insert_world_info_message, world_info_message,
+};
+use tt_domain::models::agent::profile::{
+    AgentPresetBindingMode, AgentRecallInheritance, ResolvedAgentProfile,
+};
 use tt_domain::models::agent::{
     AgentDelegationContinuation, AgentInvocation, AgentInvocationStatus, AgentRunEventLevel,
     AgentRunPresentation, AgentRunSkillScopeRefs, AgentTaskRecord, AgentTaskStatus, WorkspacePath,
@@ -306,6 +314,35 @@ impl AgentRuntimeService {
             );
             request
         };
+
+        // A sub-agent starts from a prompt of its own — a system prompt and the
+        // task — so the parent's recall is not in it unless the Profile asks for
+        // it. Inheriting is the only way it can have any: the recall happened
+        // once, before the run input was frozen, and asking the index again would
+        // be the same question with the same context.
+        if profile.recall.subagent == AgentRecallInheritance::Inherit {
+            let blocks = recall_block_texts(&prompt_snapshot, &profile.recall);
+            if let Some(message) = inherit_recall_message(&blocks) {
+                insert_system_message_after_prompt(&mut request.payload, message);
+            }
+        }
+
+        // World Info is the other half of the same decision, and the one a fixed
+        // style sheet or house rule belongs in: the run's scan already activated
+        // the entries, and this Profile says which of them the SubAgent is given,
+        // word for word — no Skill to open, and nothing summarised on the way in.
+        if profile.context.world_info.subagent_inherits
+            || !profile.context.world_info.entries.is_empty()
+        {
+            let carried = entries_for_subagent(
+                &profile.context.world_info,
+                activated_entries(&prompt_snapshot),
+            );
+            if let Some(message) = world_info_message(&carried) {
+                insert_world_info_message(&mut request.payload, message);
+            }
+        }
+
         self.resolve_model_binding(run_id, &profile, &mut request)
             .await?;
         let request = prepare_agent_tool_request(

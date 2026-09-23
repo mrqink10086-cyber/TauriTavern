@@ -8,7 +8,7 @@ use tt_ports::repositories::agent_profile_storage_health_repository::{
 };
 use tt_ports::repositories::preset_repository::PresetRepository;
 
-mod constants;
+pub(crate) mod constants;
 mod defaults;
 mod model_config;
 mod output_policy;

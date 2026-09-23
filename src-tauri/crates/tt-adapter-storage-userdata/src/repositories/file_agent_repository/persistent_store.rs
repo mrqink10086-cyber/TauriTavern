@@ -8,14 +8,16 @@ use uuid::Uuid;
 
 use super::FileAgentRepository;
 use super::fs_tree::{copy_directory_contents, scan_workspace_files, snapshot_map};
-use super::paths::validate_workspace_root_path;
+use super::paths::{PERSISTENT_STATES_DIR, validate_workspace_root_path};
 use tt_domain::errors::DomainError;
 use tt_domain::models::agent::{
     AgentRun, WorkspaceManifest, WorkspacePersistentChange, WorkspacePersistentChangeKind,
     WorkspacePersistentChangeSet, WorkspaceRootCommit, WorkspaceRootMount, WorkspaceRootScope,
 };
 use tt_ports::repositories::agent_run_repository::AgentRunRepository;
-use tt_ports::repositories::workspace_repository::WorkspaceRepository;
+use tt_ports::repositories::workspace_repository::{
+    PersistentFileWrite, WorkspaceRepository,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,12 +40,16 @@ pub(super) struct PersistentSnapshotFile {
 pub(super) struct PersistentStateManifest {
     version: u32,
     state_id: String,
+    /// The run that published this version. Empty when a user edited state
+    /// outside any run: there is no run to name, and inventing one would make
+    /// the field lie about where a version came from.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     run_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     base_state_id: Option<String>,
     created_at: DateTime<Utc>,
-    files: Vec<PersistentSnapshotFile>,
-    changes: Vec<WorkspacePersistentChange>,
+    pub(super) files: Vec<PersistentSnapshotFile>,
+    pub(super) changes: Vec<WorkspacePersistentChange>,
 }
 
 impl FileAgentRepository {
@@ -293,6 +299,212 @@ impl FileAgentRepository {
         }
 
         Ok(changes)
+    }
+
+    /// Publish a new persistent version that no run stands behind.
+    ///
+    /// The version carries everything its base carried and the given files on
+    /// top, so a reader never sees a version that is missing a root it inherited.
+    /// The change list is the diff against the base, which is what makes the
+    /// "already published" fingerprint comparable with a run's own versions.
+    pub(super) async fn publish_persistent_files(
+        &self,
+        workspace_id: &str,
+        base_state_id: Option<&str>,
+        writes: &[PersistentFileWrite],
+    ) -> Result<WorkspacePersistentChangeSet, DomainError> {
+        if writes.is_empty() {
+            return Err(DomainError::InvalidData(
+                "agent.persistent_write_empty: a state write must name at least one file".to_string(),
+            ));
+        }
+
+        // The whole publish is one critical section: two writers deriving from
+        // the same base must not both believe they are the newest version.
+        let _guard = self.persist_lock.lock().await;
+
+        let base = match base_state_id {
+            Some(state_id) => {
+                let state_dir = self.persistent_state_dir(workspace_id, state_id)?;
+                let manifest = self
+                    .read_persistent_state_manifest(&state_dir, state_id)
+                    .await?;
+                Some((state_dir, manifest))
+            }
+            None => None,
+        };
+        let base_dir = base.as_ref().map(|(dir, _)| dir.clone());
+        let base_files = snapshot_map(
+            base.as_ref()
+                .map(|(_, manifest)| manifest.files.clone())
+                .unwrap_or_default(),
+        );
+
+        // The roots are the ones the base already has, plus any the new files
+        // name: a chat whose first version came from a run keeps every root that
+        // run published.
+        let mut roots: Vec<String> = Vec::new();
+        for path in base_files.keys().cloned().chain(
+            writes
+                .iter()
+                .map(|write| write.path.as_str().to_string()),
+        ) {
+            let root = path.split('/').next().unwrap_or_default();
+            if !root.is_empty() && !roots.iter().any(|known| known == root) {
+                roots.push(root.to_string());
+            }
+        }
+        roots.sort();
+
+        let states_dir = self
+            .chat_dir(workspace_id)?
+            .join(PERSISTENT_STATES_DIR);
+        fs::create_dir_all(&states_dir).await.map_err(|error| {
+            DomainError::InternalError(format!(
+                "Failed to create persistent states directory {}: {}",
+                states_dir.display(),
+                error
+            ))
+        })?;
+
+        let state_id = Uuid::new_v4().to_string();
+        let state_dir = self.persistent_state_dir(workspace_id, &state_id)?;
+        let temp_dir = states_dir.join(format!(
+            ".{}.tmp-{}",
+            state_id,
+            Uuid::new_v4().simple()
+        ));
+        fs::create_dir(&temp_dir).await.map_err(|error| {
+            DomainError::InternalError(format!(
+                "Failed to create persistent state temp directory {}: {}",
+                temp_dir.display(),
+                error
+            ))
+        })?;
+
+        let publish_result = async {
+            for root in &roots {
+                let target_root = temp_dir.join(root);
+                if let Some(source_root) = base_dir.as_ref().map(|dir| dir.join(root))
+                    && fs::symlink_metadata(&source_root).await.is_ok()
+                {
+                    copy_directory_contents(&source_root, &target_root).await?;
+                }
+                // The target root has to exist even when it only carries new
+                // files, so the scan below sees the same roots either way.
+                fs::create_dir_all(&target_root).await.map_err(|error| {
+                    DomainError::InternalError(format!(
+                        "Failed to create persistent state root {}: {}",
+                        target_root.display(),
+                        error
+                    ))
+                })?;
+            }
+
+            for write in writes {
+                let target = temp_dir.join(write.path.as_str());
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent).await.map_err(|error| {
+                        DomainError::InternalError(format!(
+                            "Failed to create persistent write parent {}: {}",
+                            parent.display(),
+                            error
+                        ))
+                    })?;
+                }
+                fs::write(&target, write.text.as_bytes())
+                    .await
+                    .map_err(|error| {
+                        DomainError::InternalError(format!(
+                            "Failed to write persistent file {}: {}",
+                            target.display(),
+                            error
+                        ))
+                    })?;
+            }
+
+            let mut files = Vec::new();
+            for root in &roots {
+                files.extend(scan_workspace_files(&temp_dir.join(root), root).await?);
+            }
+            files.sort_by(|a, b| a.path.cmp(&b.path));
+
+            let mut changes = Vec::new();
+            for file in &files {
+                let kind = match base_files.get(&file.path) {
+                    Some(base_file) if base_file.sha256 == file.sha256 => continue,
+                    Some(_) => WorkspacePersistentChangeKind::Modified,
+                    None => WorkspacePersistentChangeKind::Added,
+                };
+                changes.push(WorkspacePersistentChange {
+                    path: file.path.clone(),
+                    kind,
+                    sha256: file.sha256.clone(),
+                    bytes: file.bytes,
+                });
+            }
+            changes.sort_by(|a, b| a.path.cmp(&b.path));
+
+            Ok::<(Vec<PersistentSnapshotFile>, Vec<WorkspacePersistentChange>), DomainError>((
+                files, changes,
+            ))
+        }
+        .await;
+
+        let (files, changes) = match publish_result {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&temp_dir).await;
+                return Err(error);
+            }
+        };
+
+        // Nothing changed: reuse the version this write started from instead of
+        // publishing an identical one.
+        if changes.is_empty() {
+            let _ = fs::remove_dir_all(&temp_dir).await;
+            let state_id = base_state_id.ok_or_else(|| {
+                DomainError::InvalidData(
+                    "agent.persistent_write_unchanged: a write with no base and no change has nothing to publish"
+                        .to_string(),
+                )
+            })?;
+            return Ok(WorkspacePersistentChangeSet {
+                state_id: state_id.to_string(),
+                base_state_id: base_state_id.map(str::to_string),
+                changes,
+            });
+        }
+
+        let manifest = PersistentStateManifest {
+            version: 1,
+            state_id: state_id.clone(),
+            run_id: String::new(),
+            base_state_id: base_state_id.map(str::to_string),
+            created_at: Utc::now(),
+            files,
+            changes: changes.clone(),
+        };
+        if let Err(error) = Self::write_json_atomic(&temp_dir.join("manifest.json"), &manifest).await
+        {
+            let _ = fs::remove_dir_all(&temp_dir).await;
+            return Err(error);
+        }
+        if let Err(error) = fs::rename(&temp_dir, &state_dir).await {
+            let _ = fs::remove_dir_all(&temp_dir).await;
+            return Err(DomainError::InternalError(format!(
+                "Failed to promote persistent state {} to {}: {}",
+                temp_dir.display(),
+                state_dir.display(),
+                error
+            )));
+        }
+
+        Ok(WorkspacePersistentChangeSet {
+            state_id,
+            base_state_id: base_state_id.map(str::to_string),
+            changes,
+        })
     }
 
     pub(super) async fn read_persistent_state_manifest(

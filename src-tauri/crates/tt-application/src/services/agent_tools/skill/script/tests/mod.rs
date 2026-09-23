@@ -14,6 +14,7 @@ use tt_domain::models::agent::profile::{
     AgentProfileId, AgentProfileInstructions, AgentProfileSourceTrace, AgentRunPolicy,
     AgentSkillPolicy, AgentToolPolicy, AgentWorkspacePolicy, ResolvedAgentOutputPolicy,
 };
+use tt_domain::models::agent::profile::DEFAULT_AGENT_TOOL_UNFOLDED_TURNS;
 use tt_domain::models::agent::{
     AgentChatRef, AgentRun, AgentRunPresentation, ArtifactSpec, ArtifactTarget, CommitPolicy,
     WorkspaceInputManifest, WorkspaceManifest, WorkspacePath, WorkspacePersistentChangeSet,
@@ -29,8 +30,8 @@ use tt_domain::models::skill::{
 use tt_domain::models::tool::{ToolArguments, ToolId};
 use tt_ports::repositories::skill_repository::SkillRepository;
 use tt_ports::repositories::workspace_repository::{
-    WorkspaceAppendResult, WorkspaceEntry, WorkspaceEntryKind, WorkspaceFile, WorkspaceFileList,
-    WorkspaceWriteGuard,
+    PersistentFileWrite, WorkspaceAppendResult, WorkspaceEntry, WorkspaceEntryKind, WorkspaceFile,
+    WorkspaceFileList, WorkspaceWriteGuard,
 };
 
 // ---- fakes ----------------------------------------------------------
@@ -254,6 +255,15 @@ impl WorkspaceRepository for FakeWorkspaceRepo {
         unreachable!("script tests do not start runs")
     }
 
+    async fn read_persistent_state_file(
+        &self,
+        _workspace_id: &str,
+        _state_id: &str,
+        _path: &WorkspacePath,
+    ) -> Result<WorkspaceFile, DomainError> {
+        unreachable!("script tests read only the run workspace")
+    }
+
     async fn initialize_run(
         &self,
         _run: &AgentRun,
@@ -411,6 +421,15 @@ impl WorkspaceRepository for FakeWorkspaceRepo {
     ) -> Result<WorkspacePersistentChangeSet, DomainError> {
         unreachable!("not needed")
     }
+
+    async fn publish_persistent_files(
+        &self,
+        _workspace_id: &str,
+        _base_state_id: Option<&str>,
+        _files: &[PersistentFileWrite],
+    ) -> Result<WorkspacePersistentChangeSet, DomainError> {
+        unreachable!("not needed")
+    }
 }
 
 // ---- helpers --------------------------------------------------------
@@ -469,6 +488,7 @@ fn base_profile() -> ResolvedAgentProfile {
             max_rounds: 1,
             max_calls_per_run: 1,
             mcp_result_inline_char_limit: 50_000,
+            unfolded_tool_turns: DEFAULT_AGENT_TOOL_UNFOLDED_TURNS,
             max_calls_per_tool: Default::default(),
         },
         skills: AgentSkillPolicy {
@@ -498,6 +518,8 @@ fn base_profile() -> ResolvedAgentProfile {
             message_body_artifact_id: "main".to_string(),
             message_body_path: "output/main.md".to_string(),
         },
+        state_access: Default::default(),
+        recall: Default::default(),
         source_trace: AgentProfileSourceTrace {
             profile_source: "test".to_string(),
         },
@@ -615,4 +637,5 @@ async fn run_with_outcome(
 }
 
 mod execution;
+mod state;
 mod workspace;

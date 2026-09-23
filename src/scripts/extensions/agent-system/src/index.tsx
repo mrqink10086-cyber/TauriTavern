@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client';
 import { reportAgentSystemError, requireAgentApi, waitForHostReady } from './host-api';
 import { translateAgentSystem as tr } from './i18n';
 import { mountChatInputAgentToggle } from './chat-input-toggle';
+import { runDefaultSceneSeed } from './default-scene-seed';
 import { mountEmbeddedAssetButtons } from './embedded-assets-buttons';
 import { mountAgentRunTimelinePanel } from './run-timeline-panel';
 import { mountSkillManagerSettingsPanel } from './skill-manager/settings-entry';
@@ -59,6 +60,10 @@ async function mountAgentSystem(): Promise<void> {
         mountChatInputAgentToggle(),
         mountAgentRunTimelinePanel(),
     ]);
+
+    // Fire and forget: this is a content pass, not part of mounting, and the
+    // module's own top-level await must not wait on the backend for it.
+    void runDefaultSceneSeed();
 }
 
 // Top-level await propagates startup failures after every independent mount

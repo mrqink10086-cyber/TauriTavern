@@ -70,7 +70,7 @@ export function enqueueImportedCharacterAgentAssetScan(options) {
 
 /**
  * @param {any} character
- * @param {'agentProfiles' | 'skills'} field
+ * @param {'agentProfiles' | 'skills' | 'stateDeclarations' | 'stateMachines' | 'statePredicates'} field
  */
 function getImportedCharacterTauriExtensionField(character, field) {
     const sources = [
@@ -90,8 +90,8 @@ function getImportedCharacterTauriExtensionField(character, field) {
 
 /**
  * @param {{ character?: any; postImport?: any }} options
- * @param {'agentProfiles' | 'skills'} field
- * @param {'has_agent_profiles' | 'has_agent_skills'} hintField
+ * @param {'agentProfiles' | 'skills' | 'stateDeclarations' | 'stateMachines' | 'statePredicates'} field
+ * @param {'has_agent_profiles' | 'has_agent_skills' | 'has_state_declarations' | 'has_state_machines' | 'has_state_predicates'} hintField
  */
 function hasImportedCharacterAgentAsset({ character, postImport }, field, hintField) {
     if (postImport && typeof postImport === 'object' && !Array.isArray(postImport)
@@ -101,6 +101,20 @@ function hasImportedCharacterAgentAsset({ character, postImport }, field, hintFi
 
     const value = getImportedCharacterTauriExtensionField(character, field);
     return value !== undefined && value !== null;
+}
+
+/**
+ * Whether a card carries the named state assets the shared installer handles.
+ *
+ * The two keys install through one module, so the caller only needs to know
+ * whether either of them is present.
+ *
+ * @param {{ character?: any; postImport?: any }} options
+ * @returns {boolean}
+ */
+function hasImportedCharacterStateAssets(options) {
+    return hasImportedCharacterAgentAsset(options, 'stateMachines', 'has_state_machines')
+        || hasImportedCharacterAgentAsset(options, 'statePredicates', 'has_state_predicates');
 }
 
 function getToastr() {
@@ -147,8 +161,14 @@ async function promptForImportedCharacterAgentAssets(options) {
         'skills',
         'has_agent_skills',
     );
+    const hasScenes = hasImportedCharacterAgentAsset(
+        { character, postImport },
+        'stateDeclarations',
+        'has_state_declarations',
+    );
+    const hasStateAssets = hasImportedCharacterStateAssets({ character, postImport });
 
-    if (!hasProfiles && !hasSkills) {
+    if (!hasProfiles && !hasSkills && !hasScenes && !hasStateAssets) {
         return;
     }
 
@@ -175,5 +195,18 @@ async function promptForImportedCharacterAgentAssets(options) {
     if (hasSkills) {
         const { maybePromptForCharacterEmbeddedSkills } = await import('./agent-skills/embedded-import.js');
         await maybePromptForCharacterEmbeddedSkills({ avatarFileName, label, loadCharacter });
+    }
+
+    // Scenes go last on purpose: the two prompts above are questions, and a card
+    // that ships a scene should end on the panel appearing, not on a toast. The
+    // named state assets install the same silent way, right after it.
+    if (hasScenes) {
+        const { maybeInstallCharacterEmbeddedScenes } = await import('./state-declarations/embedded-import.js');
+        await maybeInstallCharacterEmbeddedScenes({ avatarFileName, label, loadCharacter });
+    }
+
+    if (hasStateAssets) {
+        const { maybeInstallCharacterEmbeddedNamedAssets } = await import('./state-assets/embedded-import.js');
+        await maybeInstallCharacterEmbeddedNamedAssets({ avatarFileName, label, loadCharacter });
     }
 }

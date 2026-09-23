@@ -20,6 +20,7 @@ import { registerSdRoutes } from './sd-routes.js';
 import { registerTranslateRoutes } from './translate-routes.js';
 import { registerTtsRoutes } from './tts-routes.js';
 import { registerVectorRoutes } from './vector-routes.js';
+import { registerSimilharityRoutes } from './similharity-routes.js';
 import { registerSpriteRoutes } from './sprite-routes.js';
 
 export function registerRoutes(router, context, responses) {
@@ -39,6 +40,7 @@ export function registerRoutes(router, context, responses) {
     registerAiRoutes(router, context, responses);
     registerTokenizerRoutes(router, context, responses);
     registerVectorRoutes(router, context, responses);
+    registerSimilharityRoutes(router, context, responses);
     registerSpriteRoutes(router, context, responses);
     registerProviderRoutes(router, context, responses);
     registerSearchRoutes(router, context, responses);

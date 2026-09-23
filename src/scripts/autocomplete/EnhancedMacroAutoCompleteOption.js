@@ -14,6 +14,7 @@ import { enumIcons } from '../slash-commands/SlashCommandCommonEnumsProvider.js'
 import { ValidFlagSymbols } from '../macros/engine/MacroFlags.js';
 import { MACRO_VARIABLE_SHORTHAND_PATTERN } from '../macros/engine/MacroLexer.js';
 import { onboardingExperimentalMacroEngine } from '../macros/engine/MacroDiagnostics.js';
+import { escapeHtml } from '../utils.js';
 
 /** @typedef {import('../macros/engine/MacroRegistry.js').MacroDefinition} MacroDefinition */
 
@@ -692,7 +693,8 @@ export class VariableShorthandAutoCompleteOption extends AutoCompleteOption {
         ];
         for (const ex of examples) {
             const li = document.createElement('li');
-            li.innerHTML = `<code>${ex.split(' - ')[0]}</code> - ${ex.split(' - ')[1]}`;
+            const [syntax, hint] = ex.split(' - ');
+            li.innerHTML = `<code>${escapeHtml(syntax)}</code> - ${escapeHtml(hint)}`;
             exampleList.append(li);
         }
         details.append(exampleList);
@@ -815,7 +817,7 @@ export class VariableNameAutoCompleteOption extends AutoCompleteOption {
 
             const warningText = document.createElement('p');
             warningText.style.cssText = 'margin: 0 0 8px 0;';
-            warningText.innerHTML = `The name <code>${this.#varName}</code> cannot be used with variable shorthand syntax.`;
+            warningText.innerHTML = `The name <code>${escapeHtml(this.#varName)}</code> cannot be used with variable shorthand syntax.`;
             warningBox.append(warningText);
 
             const rulesText = document.createElement('p');
@@ -830,9 +832,11 @@ export class VariableNameAutoCompleteOption extends AutoCompleteOption {
 
         // Header
         const header = document.createElement('h3');
+        // #varName is the text the user is currently typing, so it must not reach innerHTML raw.
+        const varNameHtml = escapeHtml(this.#varName);
         header.innerHTML = this.#isNewVariable
-            ? `<code>${prefix}${this.#varName}</code> (New ${scopeLabel} Variable)`
-            : `<code>${prefix}${this.#varName}</code> ${scopeLabel} Variable`;
+            ? `<code>${prefix}${varNameHtml}</code> (New ${scopeLabel} Variable)`
+            : `<code>${prefix}${varNameHtml}</code> ${scopeLabel} Variable`;
         details.append(header);
 
         // Description
@@ -873,7 +877,8 @@ export class VariableNameAutoCompleteOption extends AutoCompleteOption {
         ];
         for (const ex of examples) {
             const li = document.createElement('li');
-            li.innerHTML = `<code>${ex.split(' - ')[0]}</code> - ${ex.split(' - ')[1]}`;
+            const [syntax, hint] = ex.split(' - ');
+            li.innerHTML = `<code>${escapeHtml(syntax)}</code> - ${escapeHtml(hint)}`;
             usageList.append(li);
         }
         details.append(usageList);
@@ -1133,7 +1138,7 @@ export class VariableValueContextAutoCompleteOption extends AutoCompleteOption {
         // Current value being typed
         if (this.#currentValue) {
             const currentNote = document.createElement('p');
-            currentNote.innerHTML = `<em>Currently typing:</em> <code>${this.#currentValue}</code>`;
+            currentNote.innerHTML = `<em>Currently typing:</em> <code>${escapeHtml(this.#currentValue)}</code>`;
             details.append(currentNote);
         }
 

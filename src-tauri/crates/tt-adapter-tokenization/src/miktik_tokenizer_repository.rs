@@ -1,12 +1,15 @@
+use crate::builtin_vocabularies::{self, BuiltinVocabulary};
+
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock as SyncRwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use flate2::read::GzDecoder;
+use kitoken::Kitoken;
 use miktik::{CumulativeEstimateOptions, TokenizerError, TokenizerRegistry};
 use serde_json::Value;
 use tokio::sync::{Mutex, RwLock};
@@ -14,7 +17,7 @@ use tokio::sync::{Mutex, RwLock};
 use tt_adapter_http::{HttpClientPool, HttpClientProfile};
 use tt_domain::errors::DomainError;
 use tt_ports::repositories::tokenizer_repository::{
-    TokenizerRepository, openai_content_token_limit,
+    TokenizerRepository, openai_content_token_limit, openai_text_token_count,
 };
 
 const CLAUDE_JSON_GZIP_BYTES: &[u8] =
@@ -55,6 +58,18 @@ pub struct MiktikTokenizerRepository {
     http_clients: Arc<HttpClientPool>,
     ready_models: RwLock<HashSet<&'static str>>,
     registration_guard: Mutex<()>,
+    /// The vocabularies that ship with the app, keyed by their canonical name.
+    ///
+    /// They are loaded here rather than registered with the registry: the
+    /// registry would resolve a name it does not know to `gpt-3.5-turbo` and
+    /// count in the wrong vocabulary, which is the one failure a budget cannot
+    /// detect.
+    ///
+    /// A synchronous lock, unlike the async ones above: `encode` is a
+    /// synchronous call, and this map is only ever read to clone an `Arc`.
+    builtin: SyncRwLock<HashMap<&'static str, Arc<Kitoken>>>,
+    /// Vocabularies the user supplied, keyed by the path they named.
+    custom: SyncRwLock<HashMap<String, Arc<Kitoken>>>,
 }
 
 impl MiktikTokenizerRepository {
@@ -65,6 +80,8 @@ impl MiktikTokenizerRepository {
             http_clients,
             ready_models: RwLock::new(HashSet::new()),
             registration_guard: Mutex::new(()),
+            builtin: SyncRwLock::new(HashMap::new()),
+            custom: SyncRwLock::new(HashMap::new()),
         }
     }
 
@@ -424,6 +441,242 @@ impl MiktikTokenizerRepository {
         }
     }
 
+    /// A tokenizer that does not come from the registry, when the name is one.
+    ///
+    /// Two kinds answer here: a family that ships with the app, and a file the
+    /// user supplied. `None` means the name belongs to the registry, which is
+    /// where every SillyTavern-compatible name still goes.
+    fn local_tokenizer(&self, model: &str) -> Result<Option<Arc<Kitoken>>, DomainError> {
+        if let Some(path) = builtin_vocabularies::user_file(model) {
+            let loaded = self
+                .custom
+                .read()
+                .map_err(|_| {
+                    DomainError::InternalError("custom tokenizer lock poisoned".to_string())
+                })?
+                .get(path)
+                .cloned()
+                .ok_or_else(|| {
+                    DomainError::NotFound(format!(
+                        "`{path}` has not been loaded yet; wait for readiness before counting"
+                    ))
+                })?;
+            return Ok(Some(loaded));
+        }
+
+        match builtin_vocabularies::resolve(model) {
+            Some(_) => Ok(Some(self.builtin_tokenizer(model)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Load a vocabulary the user named, once.
+    ///
+    /// A path is read from disk and parsed the same way a shipped family is:
+    /// outside the async runtime, because parsing a few megabytes is CPU work
+    /// and a caller waiting on it must not hold the runtime.
+    async fn ensure_custom_ready(&self, path: &str) -> Result<(), DomainError> {
+        if self.is_custom_loaded(path)? {
+            return Ok(());
+        }
+
+        let _guard = self.registration_guard.lock().await;
+        if self.is_custom_loaded(path)? {
+            return Ok(());
+        }
+
+        let owned = path.to_string();
+        let read_from = owned.clone();
+        let parsed = tokio::task::spawn_blocking(move || {
+            builtin_vocabularies::load_user_file(&read_from)
+        })
+        .await
+        .map_err(|error| {
+            DomainError::InternalError(format!(
+                "Tokenizer warm-up task failed for '{owned}': {error}"
+            ))
+        })?
+        .map_err(DomainError::InvalidData)?;
+
+        self.custom
+            .write()
+            .map_err(|_| DomainError::InternalError("custom tokenizer lock poisoned".to_string()))?
+            .insert(owned, Arc::new(parsed));
+
+        Ok(())
+    }
+
+    fn is_custom_loaded(&self, path: &str) -> Result<bool, DomainError> {
+        Ok(self
+            .custom
+            .read()
+            .map_err(|_| {
+                DomainError::InternalError("custom tokenizer lock poisoned".to_string())
+            })?
+            .contains_key(path))
+    }
+
+    /// A shipped family's tokenizer, which must already be loaded.
+    ///
+    /// Reporting "not loaded" rather than loading here keeps the contract the
+    /// port already has: `encode` is synchronous, so a caller that skipped
+    /// `ensure_model_ready` gets an error instead of a multi-hundred-millisecond
+    /// parse inside a synchronous call.
+    fn builtin_tokenizer(&self, model: &str) -> Result<Arc<Kitoken>, DomainError> {
+        let vocabulary = builtin_vocabularies::resolve(model).ok_or_else(|| {
+            DomainError::NotFound(format!(
+                "`{model}` is not one of the tokenizer families that ship with the app"
+            ))
+        })?;
+
+        self.builtin
+            .read()
+            .map_err(|_| {
+                DomainError::InternalError("builtin tokenizer lock poisoned".to_string())
+            })?
+            .get(vocabulary.canonical)
+            .cloned()
+            .ok_or_else(|| {
+                DomainError::NotFound(format!(
+                    "`{}` has not been loaded yet; wait for readiness before counting",
+                    vocabulary.canonical
+                ))
+            })
+    }
+
+    /// Load a shipped family once, keeping the parsed tokenizer.
+    async fn ensure_builtin_ready(
+        &self,
+        vocabulary: &'static BuiltinVocabulary,
+    ) -> Result<(), DomainError> {
+        if self.is_builtin_loaded(vocabulary.canonical)? {
+            return Ok(());
+        }
+
+        let _guard = self.registration_guard.lock().await;
+        if self.is_builtin_loaded(vocabulary.canonical)? {
+            return Ok(());
+        }
+
+        let canonical = vocabulary.canonical;
+        let parsed = tokio::task::spawn_blocking(move || builtin_vocabularies::load(vocabulary))
+            .await
+            .map_err(|error| {
+                DomainError::InternalError(format!(
+                    "Tokenizer warm-up task failed for '{canonical}': {error}"
+                ))
+            })?
+            .map_err(DomainError::InvalidData)?;
+
+        self.builtin
+            .write()
+            .map_err(|_| DomainError::InternalError("builtin tokenizer lock poisoned".to_string()))?
+            .insert(canonical, Arc::new(parsed));
+
+        Ok(())
+    }
+
+    fn is_builtin_loaded(&self, canonical: &str) -> Result<bool, DomainError> {
+        Ok(self
+            .builtin
+            .read()
+            .map_err(|_| {
+                DomainError::InternalError("builtin tokenizer lock poisoned".to_string())
+            })?
+            .contains_key(canonical))
+    }
+
+    /// Count a message list with a shipped tokenizer.
+    ///
+    /// These are open weights, not an API, so there is no provider-side message
+    /// accounting to mirror: the count is every field's text plus the same small
+    /// per-message overhead the OpenAI path uses, which is what a caller
+    /// budgeting a prompt is comparing against.
+    fn count_builtin_messages(
+        &self,
+        tokenizer: &Kitoken,
+        model: &str,
+        messages: &[Value],
+    ) -> Result<usize, DomainError> {
+        let mut total = 0_usize;
+        for message in messages {
+            total += 3;
+            match message {
+                Value::Object(map) => {
+                    for (key, value) in map {
+                        total += self.count_builtin_text(tokenizer, model, &Self::value_to_text(value))?;
+                        if key == "name" {
+                            total += 1;
+                        }
+                    }
+                }
+                _ => {
+                    total += self.count_builtin_text(tokenizer, model, &Self::value_to_text(message))?;
+                }
+            }
+        }
+
+        Ok(total)
+    }
+
+    fn count_builtin_text(
+        &self,
+        tokenizer: &Kitoken,
+        model: &str,
+        text: &str,
+    ) -> Result<usize, DomainError> {
+        tokenizer.encode(text, true).map(|ids| ids.len()).map_err(|error| {
+            DomainError::InternalError(format!("Failed to count tokens for '{model}': {error}"))
+        })
+    }
+
+    /// Cumulative prefix counts for a shipped tokenizer.
+    ///
+    /// The shape matches the registry-backed path: wrapper-inclusive counts, and
+    /// `stop_at` compared against the count with the single-message wrapper
+    /// taken off.
+    fn count_builtin_prefixes(
+        &self,
+        tokenizer: &Kitoken,
+        model: &str,
+        base: &str,
+        suffixes: &[String],
+        stop_at: Option<usize>,
+    ) -> Result<Vec<usize>, DomainError> {
+        let wrapper_tokens = self
+            .count_builtin_messages(
+                tokenizer,
+                model,
+                &[serde_json::json!({ "role": "system", "content": "" })],
+            )?
+            .checked_sub(self.count_builtin_text(tokenizer, model, "")?)
+            .ok_or_else(|| {
+                DomainError::InternalError(format!(
+                    "system-message wrapper reduced the token count for '{model}'"
+                ))
+            })?;
+
+        let capacity = base.len() + suffixes.iter().map(String::len).sum::<usize>();
+        let mut text = String::with_capacity(capacity);
+        text.push_str(base);
+
+        let mut counts = Vec::with_capacity(suffixes.len());
+        for suffix in suffixes {
+            text.push_str(suffix);
+            let count = self
+                .count_builtin_text(tokenizer, model, &text)?
+                .saturating_add(wrapper_tokens);
+            counts.push(count);
+
+            if stop_at.is_some_and(|limit| openai_text_token_count(count) >= limit) {
+                counts.resize(suffixes.len(), count);
+                break;
+            }
+        }
+
+        Ok(counts)
+    }
+
     fn value_to_text(value: &Value) -> Cow<'_, str> {
         match value {
             Value::String(text) => Cow::Borrowed(text),
@@ -595,11 +848,49 @@ impl MiktikTokenizerRepository {
 #[async_trait::async_trait]
 impl TokenizerRepository for MiktikTokenizerRepository {
     async fn ensure_model_ready(&self, model: &str) -> Result<(), DomainError> {
+        if let Some(path) = builtin_vocabularies::user_file(model) {
+            return self.ensure_custom_ready(path).await;
+        }
+        if let Some(vocabulary) = builtin_vocabularies::resolve(model) {
+            return self.ensure_builtin_ready(vocabulary).await;
+        }
+
         let canonical = Self::canonical_model(model);
         self.ensure_model_ready_canonical(canonical).await
     }
 
+    async fn can_count_offline(&self, model: &str) -> bool {
+        if builtin_vocabularies::user_file(model).is_some() {
+            return true;
+        }
+        // A family that ships with the app parses from the binary.
+        if builtin_vocabularies::resolve(model).is_some() {
+            return true;
+        }
+
+        let canonical = Self::canonical_model(model);
+        // A vocabulary already on disk is not a download, whatever its origin.
+        if self.is_model_ready(canonical).await {
+            return true;
+        }
+
+        match Self::model_resource_spec(canonical) {
+            // Carried by the app itself.
+            Some(spec) => matches!(spec.source, ModelSource::Bundled { .. }),
+            // No resource at all: the tiktoken encodings live in the parser's
+            // own crate, so they need nothing fetched either.
+            None => true,
+        }
+    }
+
     fn encode(&self, model: &str, text: &str) -> Result<Vec<u32>, DomainError> {
+        if let Some(tokenizer) = self.local_tokenizer(model)? {
+            let ids = tokenizer.encode(text, true).map_err(|error| {
+                DomainError::InternalError(format!("Failed to encode text for '{model}': {error}"))
+            })?;
+            return Ok(ids);
+        }
+
         let canonical = Self::canonical_model(model);
         let tokenizer = self
             .registry
@@ -612,6 +903,19 @@ impl TokenizerRepository for MiktikTokenizerRepository {
     }
 
     fn decode(&self, model: &str, token_ids: &[u32]) -> Result<String, DomainError> {
+        if let Some(tokenizer) = self.local_tokenizer(model)? {
+            // A byte sequence that is not valid UTF-8 is still a decode result;
+            // the caller decides what to do with a replacement character.
+            return tokenizer
+                .decode(token_ids, true)
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .map_err(|error| {
+                    DomainError::InternalError(format!(
+                        "Failed to decode token ids for '{model}': {error}"
+                    ))
+                });
+        }
+
         let canonical = Self::canonical_model(model);
         let tokenizer = self
             .registry
@@ -624,6 +928,10 @@ impl TokenizerRepository for MiktikTokenizerRepository {
     }
 
     fn count_messages(&self, model: &str, messages: &[Value]) -> Result<usize, DomainError> {
+        if let Some(tokenizer) = self.local_tokenizer(model)? {
+            return self.count_builtin_messages(tokenizer.as_ref(), model, messages);
+        }
+
         let canonical = Self::canonical_model(model);
 
         if TokenizerRegistry::is_sentencepiece_model(canonical) {
@@ -658,6 +966,10 @@ impl TokenizerRepository for MiktikTokenizerRepository {
     ) -> Result<Vec<usize>, DomainError> {
         if suffixes.is_empty() {
             return Ok(Vec::new());
+        }
+
+        if let Some(tokenizer) = self.local_tokenizer(model)? {
+            return self.count_builtin_prefixes(tokenizer.as_ref(), model, base, suffixes, stop_at);
         }
 
         let canonical = Self::canonical_model(model);

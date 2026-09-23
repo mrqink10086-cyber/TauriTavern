@@ -563,6 +563,7 @@ export async function loadAphroditeModels(data) {
 }
 
 let featherlessCurrentPage = 1;
+let featherlessFilterAbort = null;
 export async function loadFeatherlessModels(data) {
     const searchBar = document.getElementById('featherless_model_search_bar');
     const modelCardBlock = document.getElementById('featherless_model_card_block');
@@ -672,30 +673,30 @@ export async function loadFeatherlessModels(data) {
         });
     }
 
-    // Unset previously added listeners
-    $(searchBar).off('input');
-    $(sortOrderSelect).off('change');
-    $(classSelect).off('change');
-    $(categoriesSelect).off('change');
+    // Drop the listeners registered by a previous call. They are native listeners, so
+    // jQuery's `.off()` could never remove them and every reload stacked another copy.
+    featherlessFilterAbort?.abort();
+    featherlessFilterAbort = new AbortController();
+    const filterSignal = featherlessFilterAbort.signal;
 
     // Add event listener for input on the search bar
     searchBar.addEventListener('input', function () {
         applyFiltersAndSort();
-    });
+    }, { signal: filterSignal });
 
     // Add event listener for the sort order select
     sortOrderSelect.addEventListener('change', function () {
         applyFiltersAndSort();
-    });
+    }, { signal: filterSignal });
 
     // Add event listener for the class select
     classSelect.addEventListener('change', function () {
         applyFiltersAndSort();
-    });
+    }, { signal: filterSignal });
 
     categoriesSelect.addEventListener('change', function () {
         applyFiltersAndSort();
-    });
+    }, { signal: filterSignal });
 
     // Function to populate class selection dropdown
     function populateClassSelection(models) {

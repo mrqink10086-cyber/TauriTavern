@@ -10,29 +10,47 @@ import {
     type SkillOption,
 } from './EmbeddedAssetsContract';
 import {
+    embedMachine,
+    embedPredicateSet,
     embedProfile,
     embedSkill,
+    embedState,
     readEmbeddedAssets,
+    removeEmbeddedMachine,
+    removeEmbeddedPredicateSet,
     removeEmbeddedProfile,
     removeEmbeddedSkill,
+    removeEmbeddedState,
 } from './embedded-assets';
+import { listStateDeclarations } from './state-config-api';
+import { listStateMachines } from './state-machine-api';
+import { listStatePredicateSets } from './state-predicate-api';
 import { reportAgentSystemError, requireAgentApi, requireSkillApi } from './host-api';
 import { translateAgentSystem as tr } from './i18n';
 
 let activePanel: HTMLDialogElement | null = null;
 
 async function loadInitial(target: EmbeddedAssetTargetInput): Promise<EmbeddedAssetsInitial> {
-    const [profileResult, skills, embedded] = await Promise.all([
+    const [profileResult, skills, declarations, machines, predicates, embedded] = await Promise.all([
         requireAgentApi().profiles.list(),
         requireSkillApi().list({ scope: { kind: 'all' } }),
+        listStateDeclarations(),
+        listStateMachines(),
+        listStatePredicateSets(),
         Promise.resolve(readEmbeddedAssets(target)),
     ]);
     return {
         targetInfo: embedded.target,
         profiles: Array.isArray(profileResult?.profiles) ? profileResult.profiles : [],
         skills: buildSkillOptions(skills),
+        states: declarations,
+        machines,
+        predicates,
         embeddedProfiles: embedded.profiles,
         embeddedSkills: embedded.skills,
+        embeddedStates: embedded.states,
+        embeddedMachines: embedded.machines,
+        embeddedPredicates: embedded.predicates,
     };
 }
 
@@ -48,8 +66,14 @@ function createActions(target: EmbeddedAssetTargetInput): EmbeddedAssetsActions 
             return profile.id;
         },
         embedSkill: (skill: SkillOption) => embedSkill(target, { scope: skill.scope, name: skill.name }),
+        embedState: (stateName) => embedState(target, stateName),
+        embedMachine: (machineName) => embedMachine(target, machineName),
+        embedPredicateSet: (setName) => embedPredicateSet(target, setName),
         removeProfile: (profileId) => removeEmbeddedProfile(target, profileId),
         removeSkill: (skillName) => removeEmbeddedSkill(target, skillName),
+        removeState: (stateName) => removeEmbeddedState(target, stateName),
+        removeMachine: (machineName) => removeEmbeddedMachine(target, machineName),
+        removePredicateSet: (setName) => removeEmbeddedPredicateSet(target, setName),
         readEmbedded: () => readEmbeddedAssets(target),
         toastSuccess: (message) => {
             window.toastr?.success?.(message);
